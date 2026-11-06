@@ -1,13 +1,15 @@
 """Offline contracts for steps, checked postconditions and caller-provided values. No paid APIs, no browser."""
 
+import html
 import json
 import re
 import time
+import urllib.parse
 from unittest.mock import Mock
 
 import pytest
 
-from jev_ultrafast import Agent, Step, Value, expect, model
+from jev_ultrafast import Agent, Step, Value, expect, model, questions
 from jev_ultrafast import agent as loop
 from jev_ultrafast.browser import fingerprint
 from jev_ultrafast.waits import WaitResult
@@ -127,6 +129,7 @@ def test_invalid_expectations_are_rejected(build):
         {"goals": lambda: [Step("a", values={"": "x"})]},
         {"goals": lambda: [Step("a", values={"q": 3})]},
         {"goals": lambda: [Step("a", values={"GENERATE": "x"})]},
+        {"goals": lambda: [Step("a", values={"NONE": "x"})]},
         {"goals": lambda: [Step("a", values={"pw": Value("abc", secret=True)})]},
         {"goals": [3]},
         {"goals": [[]]},
@@ -342,7 +345,7 @@ def test_check_callables_return_a_bool_or_a_bool_with_a_reason(monkeypatch, resu
         max_rejections=9,
     )
     do(agent)
-    assert seen and seen[0] is agent.browser
+    assert seen and isinstance(seen[0], expect.Facade) and seen[0].unwrap() is agent.browser
     assert agent.state["steps"][0]["checks"][0]["met"] is met
     if isinstance(result, tuple):
         assert agent.state["steps"][0]["checks"][0]["reason"] == result[1]
@@ -441,8 +444,9 @@ def _choice_of(ids, selected):
     [
         ([], False, None),
         ([], True, None),
-        (["term"], False, ["term"]),
+        (["term"], False, ["term", "NONE"]),
         (["term"], True, ["term", "GENERATE"]),
+        (["term", "code"], False, ["term", "code", "NONE"]),
         (["term", "code"], True, ["term", "code", "GENERATE"]),
     ],
 )
@@ -564,7 +568,7 @@ def test_a_secret_that_the_page_echoes_is_scrubbed_from_what_the_model_and_state
     do(agent, "e1", "TYPE_TEXT", value="password")
     exposed = agent.state["page"]
     assert SECRET not in json.dumps(exposed, default=str) and "<secret:password>" in exposed["text"]
-    assert exposed["fingerprint"] == echoed["fingerprint"]
+    assert exposed["fingerprint"] == fingerprint(exposed) != echoed["fingerprint"]  # S3: no guess oracle
     seen = {}
     monkeypatch.setattr(loop, "choose", lambda p, g, h, **extra: seen.update(page=p) or decision("e3", "CLICK"))
     agent.command("predict")
@@ -632,3 +636,334 @@ def test_a_failing_settle_leaves_no_action_baseline(monkeypatch):
     with pytest.raises(ValueError):
         b.observe(screenshot=False)
     assert b.action_mark is None
+
+
+# --- review round 1: redaction holes (B1-B3, S2-S4, S9) ---------------------------------------------------------
+
+LOGIN = [Step("log in", values={"password": Value(SECRET, secret=True)})]
+
+
+def hook_log(agent):
+    return agent.before_action.log
+
+
+def recording_hook():
+    def hook(action, page_, text):
+        hook.log.append(json.dumps({"action": action, "page": page_, "text": text}, default=str))
+
+    hook.log = []
+    return hook
+
+
+def test_a_secret_on_the_first_page_never_reaches_the_state_the_model_or_the_hook(monkeypatch):
+    seen = []
+    observed = page(extra_text=f"hint: {SECRET}", value=SECRET)
+    agent = make(monkeypatch, LOGIN, observed=observed, before_action=recording_hook())
+    plain = {k: v for k, v in agent.state.items() if k != "browser"}
+    assert SECRET not in json.dumps(agent.snapshot(), default=str)
+    assert SECRET not in json.dumps(plain, default=str)  # also the marker and the guards
+    monkeypatch.setattr(
+        loop,
+        "choose",
+        lambda p, g, h, **extra: seen.append(json.dumps([p, g, h, extra], default=str)) or decision("e3", "CLICK"),
+    )
+    agent.command("predict")
+    agent.command("act", {"fingerprint": agent.state["page"]["fingerprint"]})
+    assert seen and all(SECRET not in blob for blob in seen)
+    assert agent.before_action.log and all(SECRET not in blob for blob in agent.before_action.log)
+    # The browser is still checked and driven with the raw first observation.
+    assert agent.fake.browser.fresh.call_args.args[0] is observed
+    assert agent.fake.browser.act.call_args.args[1] is observed
+
+
+def test_check_reasons_are_scrubbed_from_the_state_and_the_history(monkeypatch):
+    def leak(browser):
+        raise RuntimeError(f"api said {SECRET}")
+
+    steps = [
+        Step(
+            "log in",
+            values={"password": Value(SECRET, secret=True)},
+            expect=[expect.url("zzz"), expect.check(leak, "api agrees", timeout_ms=1), expect.text("zzz")],
+        )
+    ]
+    agent = make(monkeypatch, steps, expect_timeout_ms=1)
+    agent.fake.browser.evaluate.return_value = f"https://example.test/?q={SECRET}"
+    agent.fake.browser.probe.side_effect = lambda kind, timeout_ms=0, **_a: WaitResult(False, 0, f"saw {SECRET}")
+    snapshot = do(agent)
+    assert SECRET not in json.dumps(snapshot, default=str)
+    reasons = [c["reason"] for c in snapshot["steps"][0]["checks"]]
+    assert all("<secret:password>" in r for r in reasons)
+    assert [f["reason"] for f in snapshot["history"][-1]["failed"]] == reasons
+
+
+def test_a_label_that_echoes_a_secret_is_scrubbed_from_the_text_call_record(monkeypatch):
+    observed = page()
+    observed["actions"][0]["label"] = f"Search {SECRET}"
+    agent = make(monkeypatch, LOGIN, observed=observed)
+    monkeypatch.setattr(loop, "field_text", lambda _c: ("made up", {"model": "m", "latency_ms": 1, "usage": {}}))
+    monkeypatch.setenv("TEXT_MODEL_API_KEY", "k")
+    snapshot = do(agent, "e1", "TYPE_TEXT", value="GENERATE")
+    assert SECRET not in json.dumps(snapshot, default=str)
+    assert snapshot["text_calls"][0]["field"] == "Search <secret:password>"
+
+
+ODD = 'p@ss wo"rd&<1>/x'
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        ODD,
+        urllib.parse.quote(ODD),
+        urllib.parse.quote(ODD, safe=""),
+        urllib.parse.quote_plus(ODD),
+        json.dumps(ODD)[1:-1],
+        html.escape(ODD),
+        html.escape(ODD, quote=False),
+    ],
+)
+def test_every_encoded_form_of_a_secret_is_scrubbed(form, monkeypatch):
+    observed = page(extra_text=f"echo {form} end")
+    observed["url"] = f"https://example.test/?q={form}"
+    agent = make(monkeypatch, [Step("go", values={"pw": Value(ODD, secret=True)})], observed=observed)
+    blob = json.dumps(agent.snapshot(), default=str)
+    assert form not in blob and ODD not in blob
+    assert "<secret:pw>" in agent.state["page"]["url"] and "<secret:pw>" in agent.state["page"]["text"]
+
+
+def test_the_exposed_fingerprint_is_computed_from_the_scrubbed_page(monkeypatch):
+    observed = page(extra_text=f"pin {SECRET}")
+    agent = make(monkeypatch, LOGIN, observed=observed)
+    exposed = agent.state["page"]
+    assert exposed["fingerprint"] == fingerprint(exposed) != observed["fingerprint"]
+    guess = json.loads(json.dumps(exposed).replace("<secret:password>", SECRET))
+    assert fingerprint(guess) != exposed["fingerprint"]  # a candidate secret cannot be tested against it
+    plain = make(monkeypatch, "go", observed=observed)
+    assert plain.state["page"]["fingerprint"] == observed["fingerprint"]  # no secrets: untouched
+
+
+def test_the_text_helper_may_not_reply_with_a_redaction_marker(monkeypatch):
+    monkeypatch.setenv("TEXT_MODEL_API_KEY", "k")
+    reply = {"choices": [{"message": {"content": json.dumps({"text": "again <secret:password>"})}}]}
+    monkeypatch.setattr(model, "post_json", lambda *_a: reply)
+    with pytest.raises(ValueError, match="no valid field value"):
+        model.field_text({"goal": "g"})
+    assert "<secret:" in questions.TEXT_VALUE
+
+
+@pytest.mark.parametrize("form", [ODD, urllib.parse.quote_plus(ODD), json.dumps(ODD)[1:-1], html.escape(ODD)])
+@pytest.mark.parametrize("where", ["goal", "step", "later", "check"])
+def test_a_goal_or_check_description_that_holds_a_secret_is_refused_at_construction(form, where, monkeypatch):
+    secret, text = Value(ODD, secret=True), f"type {form}"
+    steps = {
+        "goal": text,
+        "step": [Step(text, values={"pw": secret})],
+        "later": [Step("fine", values={"pw": secret}), Step(text)],
+        "check": [Step("fine", values={"pw": secret}, expect=[expect.check(lambda b: True, text)])],
+    }[where]
+    opened = Mock()
+    monkeypatch.setattr(loop, "Browser", opened)
+    with pytest.raises(ValueError, match="secret"):
+        Agent("https://example.test/", steps, values={"pw": secret} if where == "goal" else None)
+    opened.assert_not_called()
+
+
+def test_goals_and_descriptions_are_scrubbed_wherever_they_are_sent_anyway(monkeypatch):
+    agent = make(monkeypatch, [Step("fine", values={"pw": Value(SECRET, secret=True)}, expect=[button()])])
+    object.__setattr__(agent.steps[0], "goal", f"sneaky {SECRET}")
+    seen = []
+    monkeypatch.setattr(loop, "choose", lambda p, g, h, **extra: seen.append(json.dumps([g, extra])) or decision())
+    agent.command("predict")
+    assert SECRET not in seen[0] and "<secret:password>" in seen[0]
+
+
+# --- review round 1: stable completion (S1) ---------------------------------------------------------------------
+
+
+def flaky(*results, log=None):
+    """A check callable that answers from `results` in order (the last one repeats) and logs each read."""
+    calls = iter(results)
+    last = [True]
+
+    def fn(browser):
+        last[0] = next(calls, last[0])
+        if log is not None:
+            log.append("check")
+        return last[0]
+
+    return fn
+
+
+def test_done_waits_for_the_page_to_settle_and_reads_every_check_again(monkeypatch):
+    log = []
+    steps = [Step("x", expect=[expect.check(flaky(True, True, log=log), "held", timeout_ms=1)])]
+    agent = make(monkeypatch, steps, expect_timeout_ms=700)
+    agent.fake.browser.settled.side_effect = lambda **kw: log.append(("settled", kw["timeout_ms"]))
+    assert do(agent)["status"] == "done"
+    assert log == ["check", ("settled", 700), "check"]
+
+
+def test_a_check_that_flips_back_across_the_settle_is_a_rejected_done(monkeypatch):
+    steps = [Step("x", expect=[expect.check(flaky(True, False), "held", timeout_ms=1)])]
+    agent = make(monkeypatch, steps, expect_timeout_ms=1)
+    snapshot = do(agent)
+    assert snapshot["status"] == "ready" and snapshot["verified"] is False
+    assert snapshot["steps"][0]["status"] == "active" and snapshot["steps"][0]["rejections"] == 1
+    entry = snapshot["history"][-1]
+    assert entry["kind"] == "done_rejected" and entry["failed"][0]["description"] == "held"
+    assert "held not met" in entry["action"]
+
+
+def test_the_second_read_covers_all_checks_not_only_the_last(monkeypatch):
+    first = expect.check(flaky(True, False), "first", timeout_ms=1)
+    second = expect.check(flaky(True, True), "second", timeout_ms=1)
+    agent = make(monkeypatch, [Step("x", expect=[first, second])], expect_timeout_ms=1)
+    snapshot = do(agent)
+    assert snapshot["status"] == "ready"
+    assert [f["description"] for f in snapshot["history"][-1]["failed"]] == ["first"]
+
+
+def test_auto_complete_needs_a_stable_pass_and_a_flip_counts_as_a_rejected_done(monkeypatch):
+    steps = [Step("x", expect=[expect.check(flaky(True, False, True, True), "held", auto=True, timeout_ms=1)])]
+    agent = make(monkeypatch, steps, expect_timeout_ms=1)
+    snapshot = do(agent, "e3", "CLICK")
+    assert snapshot["status"] == "ready" and snapshot["steps"][0]["rejections"] == 1
+    assert snapshot["history"][-1]["kind"] == "done_rejected" and snapshot["verified"] is False
+    assert do(agent, "e3", "CLICK")["status"] == "done"  # held at both reads this time
+
+
+def test_repeated_flips_end_the_run_failed(monkeypatch):
+    steps = [Step("x", expect=[expect.check(flaky(True, False, True, False), "held", auto=True, timeout_ms=1)])]
+    agent = make(monkeypatch, steps, expect_timeout_ms=1, max_rejections=2)
+    do(agent, "e3", "CLICK")
+    snapshot = do(agent, "e3", "CLICK")
+    assert snapshot["status"] == "failed" and snapshot["stop_reason"] == "expectations"
+
+
+# --- review round 1: check callables (S5) and small corrections ----------------------------------------------
+
+
+def test_a_check_callable_gets_a_read_only_facade_not_the_browser(monkeypatch):
+    got = []
+    steps = [Step("x", expect=[expect.check(lambda b: got.append(b) or True, "d", timeout_ms=1)])]
+    agent = make(monkeypatch, steps)
+    agent.fake.browser.evaluate.return_value = "https://example.test/now"
+    do(agent)
+    facade = got[0]
+    assert sorted(n for n in dir(facade) if not n.startswith("_") and n != "unwrap") == [
+        "element", "evaluate", "probe", "text", "url"
+    ]
+    assert facade.url() == "https://example.test/now"
+    assert facade.evaluate("1 + 1") == "https://example.test/now"  # forwarded to the browser
+    for name in ("act", "press", "close", "goto", "observe"):
+        assert not hasattr(facade, name)
+    agent.fake.met = True
+    assert facade.element(role="button", name="Go") is True and facade.text("Go") is True
+    agent.fake.met = False
+    assert facade.element(role="button") is False and facade.probe("text", contains="x").met is False
+
+
+def test_callables_run_in_the_auto_pass_only_when_the_caller_opts_in(monkeypatch):
+    ran = []
+    quiet = expect.check(lambda b: ran.append("quiet") or True, "quiet", timeout_ms=1)
+    agent = make(monkeypatch, [Step("x", expect=[quiet])], expect_timeout_ms=1)
+    assert do(agent, "e3", "CLICK")["status"] == "ready" and ran == []  # not run, so the step cannot complete
+    assert do(agent)["status"] == "done" and ran  # a DONE decision still checks it
+    ran.clear()
+    eager = expect.check(lambda b: ran.append("eager") or True, "eager", auto=True, timeout_ms=1)
+    agent = make(monkeypatch, [Step("x", expect=[eager])], expect_timeout_ms=1)
+    assert do(agent, "e3", "CLICK")["status"] == "done" and ran
+
+
+def test_one_callable_without_auto_keeps_the_whole_step_from_completing_by_itself(monkeypatch):
+    steps = [Step("x", expect=[button(), expect.check(lambda b: True, "api", timeout_ms=1)])]
+    agent = make(monkeypatch, steps, expect_timeout_ms=1)
+    assert do(agent, "e3", "CLICK")["status"] == "ready"
+
+
+def test_check_arguments_are_validated():
+    with pytest.raises(ValueError):
+        expect.check(lambda b: True, "d", auto="yes")
+
+    async def later(browser):
+        return True
+
+    with pytest.raises(ValueError, match="async"):
+        expect.check(later, "d")
+    assert expect.check(lambda b: True, "d", auto=True).auto is True
+
+
+def test_checks_after_the_first_unmet_one_keep_no_stale_result(monkeypatch):
+    agent = make(monkeypatch, [Step("x", expect=[button(), expect.url("/never")])], auto_complete=True)
+    agent.fake.browser.evaluate.return_value = "https://example.test/start"
+    do(agent, "e3", "CLICK")
+    assert agent.state["steps"][0]["checks"][0]["met"] is True
+    agent.fake.met = False
+    do(agent, "e3", "CLICK")
+    assert [c["met"] for c in agent.state["steps"][0]["checks"]] == [False, None]
+
+
+@pytest.mark.parametrize("result, reason", [(1, "non-bool"), ("yes", "non-bool"), (None, "None"), (False, "falsy")])
+def test_a_check_callable_that_returns_a_non_bool_says_so(monkeypatch, result, reason):
+    agent = make(monkeypatch, [Step("x", expect=[expect.check(lambda b: result, "d", timeout_ms=1)])])
+    do(agent)
+    assert reason in agent.state["steps"][0]["checks"][0]["reason"]
+
+
+def test_a_check_callable_that_returns_a_coroutine_is_unmet_without_a_warning(monkeypatch):
+    async def later():
+        return True
+
+    agent = make(monkeypatch, [Step("x", expect=[expect.check(lambda b: later(), "d", timeout_ms=1)])])
+    do(agent)
+    assert "async" in agent.state["steps"][0]["checks"][0]["reason"]
+
+
+# --- review round 1: values with no helper (nit) --------------------------------------------------------------
+
+
+def test_with_values_and_no_helper_a_declared_none_choice_is_offered_and_worded(monkeypatch):
+    sent, _ = space(["term"], False, monkeypatch)
+    criteria = sent["questions"]["type_text_value"]["criteria"]
+    assert "NONE" in criteria and "GENERATE" not in criteria
+    assert "declared value" in sent["questions"]["operation"]["criteria"]["TYPE_TEXT"]
+    assert "small LLM" not in sent["questions"]["operation"]["criteria"]["TYPE_TEXT"]
+    assert "NONE" in questions.VALUES
+
+
+def test_the_done_criterion_names_the_checks_when_there_are_some(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "t")
+    sent = {}
+
+    def post(_u, _k, body):
+        sent.update(body)
+        return {"model": "m", "answers": {"operation": _choice(body, "DONE")}}
+
+    monkeypatch.setattr(model, "post_json", post)
+    model.choose(page(), "goal", [])
+    plain = sent["questions"]["operation"]["criteria"]["DONE"]
+    model.choose(page(), "goal", [], checks=["a"], completed=["b"])
+    assert plain == "Every requirement is visibly satisfied."
+    assert sent["questions"]["operation"]["criteria"]["DONE"] != plain
+    assert "checks" in sent["questions"]["operation"]["criteria"]["DONE"]
+
+
+def test_choosing_none_types_nothing_and_hides_that_field_until_the_page_changes(monkeypatch):
+    agent = make(monkeypatch, "search", values={"term": "cats"}, stuck_after=2)
+    snapshot = do(agent, "e1", "TYPE_TEXT", value="NONE")
+    agent.fake.browser.act.assert_not_called()
+    assert snapshot["status"] == "ready" and snapshot["history"] == []
+    refused = snapshot["refused"]
+    assert len(refused) == 1 and refused[0]["node"] == 10 and "no declared value" in refused[0]["reason"]
+    seen = {}
+    monkeypatch.setattr(
+        loop, "choose", lambda p, g, h, **x: seen.update(page=p, refused=x["refused"]) or decision("e3", "CLICK")
+    )
+    agent.command("predict")
+    assert [a["id"] for a in seen["page"]["actions"]] == ["e3", "wait"] and seen["refused"][0]["kind"] == "fill"
+    # A second refusal on the same page ends the run, as for a refused press.
+    again = agent.state["decision"] = decision("e1", "TYPE_TEXT", "NONE")
+    assert again
+    final = agent.command("act", {"fingerprint": agent.state["page"]["fingerprint"]})
+    assert final["status"] == "blocked" and final["stop_reason"] == "refused"
