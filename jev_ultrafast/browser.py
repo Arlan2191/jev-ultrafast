@@ -170,7 +170,7 @@ def browser_operation(request):
                   if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]') ||
                       !e.checkVisibility({checkOpacity:phase!=='reveal',checkVisibilityCSS:true})) return null;
                   // Hover-tolerant: the observed guard without its trailing scope text (see snapshot.js).
-                  if (false && JSON.stringify(window.__jevFast.guard(e,false))!==
+                  if (guarded && JSON.stringify(window.__jevFast.guard(e,false))!==
                       JSON.stringify(action.guard?.slice(0,-1))) return null;
                   if (action.kind==='fill' && (e.readOnly || e.getAttribute('aria-readonly')==='true')) return null;
                   const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
