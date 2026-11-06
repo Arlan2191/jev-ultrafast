@@ -88,6 +88,8 @@ def test_json_and_text_bodies_arrive_intact_and_end_the_request(blank):
 def test_an_unread_small_body_does_not_hang_the_counter(blank):
     run(blank, "fetch('/api/0').then(() => 1)")
     assert until(lambda: inflight(blank) == 0, 3), "a response nobody reads kept the request in flight"
+    # Chrome reports no resource-timing entry for it; the unread check releases it well before the 30 s cap.
+    assert blank.evaluate("window.__jevWait.stats.unread") == 1
 
 
 def test_the_response_is_the_native_one(blank):
@@ -217,7 +219,7 @@ SCENARIOS = {
 
 def test_how_each_kind_of_request_is_released(capped):
     """Records which signal ended each request (entry, abort, rejected, loadend, or the cap) and how long it took."""
-    browser = capped(3000)
+    browser = capped(5000)
     rows = []
     for label, expression in SCENARIOS.items():
         before = browser.evaluate("JSON.stringify(window.__jevWait.stats)")
@@ -229,7 +231,7 @@ def test_how_each_kind_of_request_is_released(capped):
         gained = {k: v - json.loads(before)[k] for k, v in json.loads(after).items() if v != json.loads(before)[k]}
         rows.append((label, released, took, gained))
         assert released, f"{label} was never released"
-    lines = ["### How a request is released (cap 3000 ms, headless Chrome)", "", "| scenario | released | ms | by |",
+    lines = ["### How a request is released (cap 5000 ms, headless Chrome)", "", "| scenario | released | ms | by |",
              "| --- | --- | --- | --- |"]
     lines += [f"| {label} | {released} | {took} | {gained} |" for label, released, took, gained in rows]
     report = "\n".join(lines)
@@ -240,12 +242,17 @@ def test_how_each_kind_of_request_is_released(capped):
             handle.write(report + "\n\n")
 
 
-def test_a_body_nobody_reads_is_released_by_the_cap(capped):
+def test_a_body_that_is_read_slowly_is_released_by_the_cap(capped):
     browser = capped(1500)
-    run(browser, "fetch('/big?id=capped').then(() => 1)")
+    run(
+        browser,
+        "fetch('/big?id=capped').then(async r => {"
+        " window.rd = r.body.getReader(); await window.rd.read(); return 1; })",
+    )
     began = time.monotonic()
     assert inflight(browser) == 1
     assert until(lambda: inflight(browser) == 0, 6)
     held = time.monotonic() - began
-    assert 1.0 <= held <= 4.0, held
+    assert 1.0 <= held <= 4.0, held  # One chunk was read and the reader stopped: only the cap releases it.
     assert browser.evaluate("window.__jevWait.stats.cap") == 1
+    browser.evaluate("window.rd.cancel(); 1")

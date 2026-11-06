@@ -102,6 +102,8 @@ def test_one_click_tick_breakdown(open_page, fixture_base_url, monkeypatch, new_
             agent.browser.evaluate("1")
             floor.append((time.perf_counter() - start) * 1000)
         used = agent.browser.new_window
+        version = browser_module.cdp("Browser.getVersion")
+        print("Browser.getVersion:", version.get("product"), "|", version.get("userAgent"))
         if new_window is None:
             assert used is True  # Auto picks a window of its own in headless Chrome.
         recorder.calls.clear()

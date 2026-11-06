@@ -189,7 +189,8 @@ def test_a_polling_page_settles_because_later_timers_never_hold_the_wait(start):
     result = agent.wait_for("settled", quiet_ms=300, timeout_ms=6000)
     # The pending poll timer (400 ms) holds the wait once; the timer its continuation arms afterwards does not.
     assert result.met is True and result.waited_ms < 2500, result
-    assert agent.browser.evaluate("window.polls") >= 1
+    time.sleep(1.0)
+    assert agent.browser.evaluate("window.polls") >= 1  # The page really keeps polling.
 
 
 def test_the_poll_timer_is_not_waited_for_when_timer_counting_is_off(start):
@@ -285,6 +286,7 @@ def test_the_agent_level_ignored_attributes_apply_to_settled(start):
     assert agent.wait_for("settled", quiet_ms=200, timeout_ms=700).met is True
     # A child list change is not an attribute: it still counts.
     agent.browser.evaluate("setInterval(() => document.body.append(document.createElement('i')), 20); 1")
+    time.sleep(0.15)
     assert agent.wait_for("settled", quiet_ms=200, timeout_ms=500).met is False
 
 

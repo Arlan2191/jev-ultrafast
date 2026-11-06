@@ -5,19 +5,21 @@
   if (window.__jevWait) return window.__jevWait;
   if (window.parent !== window) return null; // The main frame only.
   const {visible, name, selector, role} = __A11Y__;
-  const BODY_CAP_MS = __BODY_CAP_MS__, MAX_ENDS = 500, MAX_STARTS = 500;
+  const BODY_CAP_MS = __BODY_CAP_MS__, UNREAD_BODY_MS = 500, MAX_ENDS = 500, MAX_STARTS = 500;
   const nativeSet = window.setTimeout.bind(window), nativeClear = window.clearTimeout.bind(window);
   const now = () => performance.now();
   const w = {epoch: Math.random().toString(36).slice(2), inflight: new Map(), ends: [], starts: [], timers: new Map(),
     holds: new Map(), stable: new Map(), lastOther: now(), attrLast: new Map(), interactiveAt: now(),
-    stats: {entry: 0, cap: 0, rejected: 0, abort: 0, loadend: 0}};
+    stats: {entry: 0, cap: 0, unread: 0, rejected: 0, abort: 0, loadend: 0}};
   let seq = 0;
 
   // A request is in flight from the call until (1) its promise rejects or the page aborts it, (2) the browser reports
-  // its resource-timing entry, (3) XHR fires loadend, or (4) body_cap_ms after the response headers arrived.
+  // its resource-timing entry (which Chrome does when the body was read to the end or cancelled), (3) XHR fires
+  // loadend, (4) the response arrived but the page has not started to read the body UNREAD_BODY_MS later (Chrome
+  // reports no entry for a body nobody reads), or (5) body_cap_ms after the response headers arrived.
   const begin = (url, kind) => {
     const id = ++seq;
-    w.inflight.set(id, {url, kind, timer: 0});
+    w.inflight.set(id, {url, kind, timers: []});
     w.starts.push([id, url]);
     if (w.starts.length > MAX_STARTS) w.starts.shift();
     return id;
@@ -25,7 +27,7 @@
   const end = (id, how) => {
     const entry = w.inflight.get(id);
     if (!entry) return;
-    nativeClear(entry.timer);
+    entry.timers.forEach(nativeClear);
     w.stats[how]++;
     w.ends.push([entry.url, now()]);
     if (w.ends.length > MAX_ENDS) w.ends.shift();
@@ -58,9 +60,12 @@
     try { promise = Reflect.apply(target, self, args); } catch (error) { end(id, 'rejected'); throw error; }
     const signal = init?.signal ?? (input instanceof Request ? input.signal : null);
     if (signal) signal.addEventListener('abort', () => end(id, 'abort'), {once: true});
-    promise.then(() => {
+    promise.then(response => {
       const entry = w.inflight.get(id);
-      if (entry) entry.timer = nativeSet(() => end(id, 'cap'), BODY_CAP_MS);
+      if (!entry) return;
+      entry.timers.push(nativeSet(() => end(id, 'cap'), BODY_CAP_MS));
+      // bodyUsed is a plain getter: it says whether a read was requested, without touching the stream.
+      entry.timers.push(nativeSet(() => { if (!response.bodyUsed) end(id, 'unread'); }, Math.min(BODY_CAP_MS, UNREAD_BODY_MS)));
     }, () => end(id, 'rejected'));
     return promise;
   });

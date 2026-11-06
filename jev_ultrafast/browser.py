@@ -130,9 +130,11 @@ class Browser:
         # In headless Chrome an owned tab in the existing window is a background tab: after a few clicks Chrome
         # throttles its frames to about 1 Hz and every pointer move then waits ~1 s for the next frame. A window of
         # its own stays at full rate. Headed Chrome was not measured and a new window is a visible one, so by default
-        # (new_window=None) only a headless browser gets it; True or False force it.
+        # (new_window=None) only a headless browser (HeadlessChrome in its product or user agent) gets it; True or
+        # False force it.
         if new_window is None:
-            new_window = "HeadlessChrome" in cdp("Browser.getVersion").get("product", "")
+            version = cdp("Browser.getVersion")
+            new_window = "HeadlessChrome" in f"{version.get('product', '')} {version.get('userAgent', '')}"
         self.new_window = bool(new_window)
         self.target = cdp(
             "Target.createTarget", url="about:blank", background=True, newWindow=self.new_window
