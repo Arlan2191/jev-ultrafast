@@ -1,0 +1,28 @@
+<!doctype html><title>Journey</title>
+<input type="text" aria-label="Query" id="q">
+<button type="button" onclick="search()">Search</button>
+<div id="results"></div>
+<div id="detail"></div>
+<script>
+  function search() {
+    const results = document.getElementById("results");
+    const heading = document.createElement("p");
+    heading.textContent = "Results for " + document.getElementById("q").value;
+    const link = document.createElement("a");
+    link.href = "#cats";
+    link.textContent = "Open Cats";
+    link.onclick = (event) => { event.preventDefault(); openCats(); };
+    results.replaceChildren(heading, link);
+  }
+  function openCats() {
+    location.hash = "cats";
+    const title = document.createElement("h1");
+    title.textContent = "Cats detail";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.textContent = "Favourite";
+    toggle.setAttribute("aria-pressed", "false");
+    toggle.onclick = () => toggle.setAttribute("aria-pressed", "true");
+    document.getElementById("detail").replaceChildren(title, toggle);
+  }
+</script>

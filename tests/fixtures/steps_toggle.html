@@ -1,0 +1,15 @@
+<!doctype html><title>Toggle</title>
+<button type="button" aria-pressed="false" onclick="press(this)">Upvote</button>
+<p id="status">Not voted</p>
+<script>
+  // ?late=<ms> makes the page apply the press that many milliseconds after the click.
+  const late = Number(new URLSearchParams(location.search).get("late") || 0);
+  function press(button) {
+    const apply = () => {
+      button.setAttribute("aria-pressed", "true");
+      document.getElementById("status").textContent = "Voted";
+    };
+    if (late) setTimeout(apply, late);
+    else apply();
+  }
+</script>

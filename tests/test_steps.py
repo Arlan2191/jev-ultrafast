@@ -122,12 +122,12 @@ def test_invalid_expectations_are_rejected(build):
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"goals": [Step("")]},
-        {"goals": [Step("a", expect=["text"])]},
-        {"goals": [Step("a", values={"": "x"})]},
-        {"goals": [Step("a", values={"q": 3})]},
-        {"goals": [Step("a", values={"GENERATE": "x"})]},
-        {"goals": [Step("a", values={"pw": Value("abc", secret=True)})]},
+        {"goals": lambda: [Step("")]},
+        {"goals": lambda: [Step("a", expect=["text"])]},
+        {"goals": lambda: [Step("a", values={"": "x"})]},
+        {"goals": lambda: [Step("a", values={"q": 3})]},
+        {"goals": lambda: [Step("a", values={"GENERATE": "x"})]},
+        {"goals": lambda: [Step("a", values={"pw": Value("abc", secret=True)})]},
         {"goals": [3]},
         {"goals": [[]]},
         {"goals": []},
@@ -143,7 +143,7 @@ def test_construction_is_validated_before_a_browser_opens(kwargs, monkeypatch):
     opened = Mock()
     monkeypatch.setattr(loop, "Browser", opened)
     with pytest.raises(ValueError):
-        Agent("https://example.test/", **kwargs)
+        Agent("https://example.test/", **{k: v() if callable(v) else v for k, v in kwargs.items()})
     opened.assert_not_called()
 
 
@@ -176,7 +176,11 @@ def test_a_plain_string_is_one_step_with_the_same_goal_and_no_extra_request_fiel
 
 
 def test_the_model_sees_only_the_current_goal_the_completed_goals_and_the_check_descriptions(monkeypatch):
-    steps = ["Search for cats", Step("Open the first result", expect=[expect.url("/cats"), expect.text("Tabby")]), "Share"]
+    steps = [
+        "Search for cats",
+        Step("Open the first result", expect=[expect.url("/cats"), expect.text("Tabby")]),
+        "Share",
+    ]
     agent = make(monkeypatch, steps)
     seen = []
     monkeypatch.setattr(loop, "choose", lambda p, goal, history, **extra: seen.append((goal, extra)) or decision())
@@ -199,7 +203,7 @@ def test_choose_puts_steps_and_checks_in_the_instructions(monkeypatch):
         "post_json",
         lambda _u, _k, body: sent.update(body) or {"model": "m", "answers": {"operation": _choice(body)}},
     )
-    model.choose(page(), "Step two", [], completed=["Step one"], checks=["text contains \"A\""])
+    model.choose(page(), "Step two", [], completed=["Step one"], checks=['text contains "A"'])
     instructions = sent["questions"]["operation"]["instructions"]
     assert instructions["goal"] == "Step two"
     assert instructions["completed_steps"] == ["Step one"]
@@ -231,7 +235,9 @@ def test_step_records_goal_checks_timing_and_counts(monkeypatch):
     agent.command("act", {"fingerprint": agent.state["page"]["fingerprint"]})
     step = agent.state["steps"][0]
     assert step["goal"] == "press it" and step["status"] == "active"
-    assert step["checks"] == [{"description": 'element button "Go"', "met": False, "reason": "element reason", "waited_ms": 0}]
+    assert step["checks"] == [
+        {"description": 'element button "Go"', "met": False, "reason": "element reason", "waited_ms": 0}
+    ]
     assert step["model_calls"] == 1 and step["actions"] == 1
     assert step["started_ms"] is not None and step["ended_ms"] is None
 
@@ -245,7 +251,9 @@ def test_done_is_accepted_when_every_check_is_met_and_the_run_is_verified(monkey
     assert snapshot["status"] == "done" and snapshot["verified"] is True
     assert snapshot["steps"][0]["verified"] is True
     assert [c["met"] for c in snapshot["steps"][0]["checks"]] == [True, True]
-    timeouts = [c.args[1] if len(c.args) > 1 else c.kwargs["timeout_ms"] for c in agent.fake.browser.probe.call_args_list]
+    timeouts = [
+        c.args[1] if len(c.args) > 1 else c.kwargs["timeout_ms"] for c in agent.fake.browser.probe.call_args_list
+    ]
     assert timeouts == [1234, 1234]
 
 
@@ -362,7 +370,9 @@ def test_auto_complete_finishes_a_step_after_an_action_without_a_done_decision(m
     assert agent.state["plan_index"] == 1 and agent.state["steps"][0]["status"] == "done"
     assert agent.state["steps"][0]["verified"] is True
     assert agent.state["status"] == "ready"
-    timeouts = {c.args[1] if len(c.args) > 1 else c.kwargs["timeout_ms"] for c in agent.fake.browser.probe.call_args_list}
+    timeouts = {
+        c.args[1] if len(c.args) > 1 else c.kwargs["timeout_ms"] for c in agent.fake.browser.probe.call_args_list
+    }
     assert timeouts == {0}
 
 
@@ -439,7 +449,7 @@ def _choice_of(ids, selected):
 def test_the_value_head_matrix(values, helper, offered, monkeypatch):
     sent, result = space(values, helper, monkeypatch)
     if offered is None:
-        assert "type_text_value" not in sent["questions"] and "value" not in result
+        assert "type_text_value" not in sent["questions"] and result["value"] is None
     else:
         assert list(sent["questions"]["type_text_value"]["criteria"]) == offered
         assert result["value"] == offered[0]
@@ -453,7 +463,7 @@ def test_the_value_head_is_not_consulted_for_other_operations(monkeypatch):
             "model": "m",
             "answers": {
                 "operation": _choice(body, "CLICK"),
-                "click_target": _choice_of(["1"], "1"),
+                "click_target": _choice_of(["2"], "2"),
                 "type_text_target": _choice_of(["1"], "1"),
                 "type_text_value": {"choice": "invented"},
             },
@@ -567,7 +577,9 @@ def test_a_secret_that_the_page_echoes_is_scrubbed_from_what_the_model_and_state
 
 def test_a_non_secret_value_is_visible_to_the_hook_with_its_name(monkeypatch):
     hooked = []
-    agent = make(monkeypatch, "go", values={"term": "cats"}, before_action=lambda a, p, t: hooked.append((t, a["value_name"])))
+    agent = make(
+        monkeypatch, "go", values={"term": "cats"}, before_action=lambda a, p, t: hooked.append((t, a["value_name"]))
+    )
     do(agent, "e1", "TYPE_TEXT", value="term")
     assert hooked == [("cats", "term")]
 

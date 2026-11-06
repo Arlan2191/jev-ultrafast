@@ -31,7 +31,7 @@ async function call(name, body = {}) {
   return data;
 }
 function controls() {
-  const live = state?.page && !["done", "blocked", "denied", "budget"].includes(state.status);
+  const live = state?.page && !["done", "blocked", "denied", "budget", "failed"].includes(state.status);
   $("start").disabled = busy;
   $("scenario").disabled = busy;
   $("goal").disabled = busy;
@@ -87,6 +87,7 @@ function render() {
     blocked: "Stopped · no supported next action",
     denied: "Stopped · action denied by policy",
     budget: "Stopped · step or model-call budget reached",
+    failed: "Stopped · a step's checks did not hold",
   };
   $("status").textContent = labels[state.status] || state.status;
   if (!page) {
@@ -128,13 +129,14 @@ function render() {
   $("targets").hidden = !$("overlays").checked;
   $("history").innerHTML = state.history.length
     ? state.history
+        .filter((h) => h.kind !== "done_rejected")
         .map(
           (h) =>
-            `<div class="trace-row"><span class="number">${String(h.step).padStart(2, "0")}</span><div>${escape(h.action)}${h.text ? ` <b>“${escape(h.text)}”</b><small>${escape(h.text_helper)}</small>` : ""}</div><span class="time">${h.latency_ms} ms · ${percent(h.probability)}</span><span class="effect">${h.page_changed ? "Page changed" : "No change observed"}</span></div>`,
+            `<div class="trace-row"><span class="number">${String(h.step).padStart(2, "0")}</span><div>${escape(h.action)}${h.text ? ` <b>“${escape(h.text)}”</b><small>${escape(h.text_helper || h.text_source || "")}</small>` : ""}</div><span class="time">${h.latency_ms} ms · ${percent(h.probability)}</span><span class="effect">${h.page_changed ? "Page changed" : "No change observed"}</span></div>`,
         )
         .join("")
     : '<p class="muted">Each executed action leaves an observed result.</p>';
-  $("step-count").textContent = `${state.history.length} actions · ${(state.elapsed_ms / 1000).toFixed(2)} s`;
+  $("step-count").textContent = `${state.history.filter((h) => h.kind !== "done_rejected").length} actions · ${(state.elapsed_ms / 1000).toFixed(2)} s`;
   $("model-state").textContent = JSON.stringify(
     d?.request || {
       goal: state.goal,
@@ -182,7 +184,7 @@ $("auto").addEventListener("click", () =>
       } else {
         await call("tick");
       }
-      if (["done", "blocked", "denied", "budget"].includes(state.status)) break;
+      if (["done", "blocked", "denied", "budget", "failed"].includes(state.status)) break;
     }
     automatic = false;
   }, "Running the browser…"),

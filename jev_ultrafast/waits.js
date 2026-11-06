@@ -97,11 +97,14 @@
     const info = meta.get(self);
     if (!info?.async) return Reflect.apply(target, self, args);
     const id = begin(info.url, 'xmlhttprequest');
-    info.id = id;
     const open = w.inflight.get(id);
     if (open) open.timers.push(nativeSet(() => end(id, 'cap'), BODY_CAP_MS));
     self.addEventListener('loadend', () => end(id, 'loadend'), {once: true});
-    try { return Reflect.apply(target, self, args); } catch (error) { end(id, 'rejected'); throw error; }
+    try {
+      const result = Reflect.apply(target, self, args);
+      info.id = id; // Only a send that was accepted can be abandoned by a later open().
+      return result;
+    } catch (error) { end(id, 'rejected'); throw error; }
   });
 
   // Resource timing: an entry for a fetch or XHR means the browser finished that request (body included, whether or
@@ -127,7 +130,7 @@
     let id;
     const wrapped = function () { w.timers.delete(id); return callback.apply(this, arguments); };
     id = Reflect.apply(target, self, [wrapped, wait, ...rest]);
-    w.timers.set(id, {delay: Math.max(0, Number(delay) >> 0), seq: ++seq}); // 32-bit, like the browser
+    w.timers.set(id, {delay: Math.max(0, wait >> 0), seq: ++seq}); // 32-bit, like the browser
     return id;
   });
   for (const method of ['clearTimeout', 'clearInterval']) {

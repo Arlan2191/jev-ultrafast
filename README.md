@@ -169,6 +169,34 @@ print(state["status"], state["stop_reason"], state["denied"])
 
 `max_steps` bounds executed actions. `max_model_calls` bounds TypeSafe decisions plus text-helper calls (default `2 * max_steps`) and is checked before each call. `max_steps` is checked when an action would execute, so the decision that discovers the cap still counts as a model call. Reaching either ends the run with status `budget` and `state["stop_reason"]` (`max_steps` or `max_model_calls`) instead of an exception. `settle_ms` (default 50) and `autocomplete_settle_ms` (default 200, both may be 0) cap the wait after an action, and `stuck_after` (default 3) unchanged steps end the run as `blocked` (see Waits for which waits count). `before_action(action, page, text)` runs before each execution attempt, with the final typed text and copies of `action` and `page`. It can run more than once for one intended action if the page goes stale first, so keep it free of side effects or make it idempotent. A veto always prevents execution: raising `ActionDenied` executes nothing, records no history entry and ends the run as `denied`. Any other exception from the hook propagates.
 
+### Steps and checks
+
+A goal can be a list of steps, and a step can carry checks that the code evaluates, so DONE is not just the model's word:
+
+```python
+from jev_ultrafast import Agent, Step, Value, expect
+
+steps = [
+    Step("Search for the term", expect=[expect.text("Results for cats")]),
+    Step("Open the first result", expect=[expect.url("/cats"), expect.text("Cat facts")]),
+    Step(
+        "Mark it as a favourite",
+        expect=[expect.element(role="button", name="Favourite", state={"pressed": True})],
+    ),
+]
+with Agent(url, steps, values={"term": "cats"}) as agent:
+    for state in agent.run():
+        pass
+print(state["status"], state["verified"], [s["status"] for s in state["steps"]])
+```
+
+- **Steps.** `Agent(url, goals)` takes a string, or a list of strings and `Step(goal, expect=(), values=None)`; each item is one step. The model sees only the current step's goal, the goals already completed and the descriptions of the current step's checks, never the later steps. `state["steps"]` records, per step, `goal`, `status` (`pending`, `active`, `done`, `failed` or `blocked`), `checks` (description, `met`, `reason`, `waited_ms`), `started_ms`, `ended_ms`, `model_calls`, `actions` and `rejections`; `state["plan_index"]` is the current step. A plain string is one step with no checks and behaves as before; a list of strings is now one step per string (it used to be joined into one goal).
+- **Checks** are `expect.text(contains)` / `expect.no_text(contains)` (a string or a JavaScript-compatible compiled regex), `expect.element(role, name, state)` / `expect.no_element(...)` (the `element` wait), `expect.url(pattern)` (a substring, or a compiled regex that is searched), and `expect.check(fn, description)` for a callable `fn(browser) -> bool | (bool, reason)`. Each has a description that the model sees and the state records. Each takes `timeout_ms=` to override `expect_timeout_ms` (default 5000), the longest it waits for the page to catch up, so "the upvote is pressed" can wait the few hundred milliseconds the UI needs. A check never raises on timeout, and a callable that raises is recorded as unmet with its message.
+- **DONE is verified.** On a step with checks, DONE is accepted only when all hold. Otherwise it is rejected: the step does not change, the history gets an entry with `kind: "done_rejected"` and the failed descriptions, and the model sees it as a recent action (`DONE rejected: element button "Favourite" pressed=true not met`). A rejection costs a model call, is not an action (`max_steps`, `stuck_after`), and `max_rejections` (default 3) rejections on one step end the run as `failed` with `stop_reason: "expectations"`. A step without checks accepts DONE as before and is recorded with `verified: false`.
+- **Auto-complete.** After every executed action, the current step's checks are read once without waiting; if they all hold, the step completes with no DONE decision, so the run does not depend on the model noticing it is finished. An unmet check costs one browser round trip (a few milliseconds). `auto_complete=False` turns it off.
+- **Verified runs.** `state["verified"]` is `True` only when every step had checks and all passed. `require_expectations=True` makes a step without checks a `ValueError` at construction, for test runners that never want an unverified pass. `failed` is a terminal status next to `done`, `blocked`, `denied` and `budget`.
+- **Values.** `values={name: str | Value(text, secret=False)}` on the `Agent` (every step) or a `Step` (that step, overriding) are strings the caller already knows: a search term, a code. `TYPE_TEXT` then has a value choice among the declared names, plus `GENERATE` when a text helper is configured. Choosing a name types that exact string with no text-model call; the model sees the names, never the text. The history records `text_source` (`value:<name>` or `generated`) and `value_name`. A `Value(..., secret=True)` (at least 4 characters) is shown as `<secret:name>` in the history, in `state`, in the page the model reads (the copy of the observation that the agent keeps replaces the text wherever the page echoes it, for example in the field's own value or in a confirmation message), and as the `text` argument of `before_action`, which also gets the name as `action["value_name"]`; only the browser receives the real text. Limits: password inputs are not offered as targets at all (the snapshot skips them), so a secret goes to an ordinary field; screenshots (`screenshots=True`) are images of the page and are not redacted; a check callable and `expect.text` see the real page.
+
 ## Why it moves
 
 - **One request per decision cycle.** Operation and target heads share the same observed state.
