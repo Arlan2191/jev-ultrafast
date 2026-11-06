@@ -94,7 +94,7 @@
   cache.focused=()=>{
     const e=document.activeElement;
     if (!e || e===document.body || e===document.documentElement) return null;
-    const guard=safe(e) ? cache.guard(e) : (shown(e) ? [identity(e),e.type,name(e)] : null);
+    const guard=cache.guard(e);
     return {node:identity(e),role:role(e),label:name(e)||e.tagName.toLowerCase(),href:e.getAttribute('href'),
       tag:e.tagName.toLowerCase(),type:e.type??null,guard};
   };
