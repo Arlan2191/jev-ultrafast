@@ -4,5 +4,5 @@
 <button type="button" id="poll">Poll</button>
 <script>
   new EventSource('/events').onmessage = event => { window.last = event.data; };
-  document.getElementById('poll').onclick = () => fetch('/hang');
+  document.getElementById('poll').onclick = () => fetch('/hang').then(response => response.text());
 </script>
