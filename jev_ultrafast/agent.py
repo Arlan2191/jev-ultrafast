@@ -1,6 +1,7 @@
 """The complete agent loop. Typed choices, observable state, bounded execution."""
 
 import base64
+import copy
 import time
 from pathlib import Path
 
@@ -19,11 +20,11 @@ class ActionDenied(Exception):
         self.reason = reason
 
 
-def positive_int(name, value, *, optional=False):
+def positive_int(name, value, *, optional=False, minimum=1):
     if optional and value is None:
         return value
-    if type(value) is not int or value < 1:
-        raise ValueError(f"{name} must be a positive integer")
+    if type(value) is not int or value < minimum:
+        raise ValueError(f"{name} must be {'a positive' if minimum else 'a non-negative'} integer")
     return value
 
 
@@ -34,8 +35,10 @@ class Agent:
     (default 2 * max_steps). Reaching either ends the run with status "budget" and state["stop_reason"].
     settle_ms / autocomplete_settle_ms cap the post-action wait; stuck_after unchanged non-wait steps in a row
     end the run as "blocked".
-    before_action(action, page, text) runs once per action, right before execution, with the final typed text.
-    Raise ActionDenied(reason) to veto: nothing executes and the run ends as "denied".
+    before_action(action, page, text) runs before each execution attempt, with the final typed text, and receives
+    copies, so changing them cannot change what executes. It can run more than once for one intended action if the
+    page goes stale first, so keep it free of side effects or make it idempotent. Raise ActionDenied(reason) to
+    veto: a veto always prevents execution and the run ends as "denied".
     """
 
     def __init__(
@@ -58,8 +61,8 @@ class Agent:
         self.max_steps = positive_int("max_steps", max_steps)
         self.max_model_calls = positive_int("max_model_calls", max_model_calls, optional=True) or self.max_steps * 2
         self.stuck_after = positive_int("stuck_after", stuck_after)
-        positive_int("settle_ms", settle_ms)
-        positive_int("autocomplete_settle_ms", autocomplete_settle_ms)
+        positive_int("settle_ms", settle_ms, minimum=0)
+        positive_int("autocomplete_settle_ms", autocomplete_settle_ms, minimum=0)
         if before_action is not None and not callable(before_action):
             raise ValueError("before_action must be callable")
         self.before_action = before_action
@@ -169,7 +172,7 @@ class Agent:
                     state["text_calls"].append({**helper, "field": action["label"], "value": text})
             if self.before_action:
                 try:
-                    self.before_action(action, page, text)
+                    self.before_action(copy.deepcopy(action), copy.deepcopy(page), text)
                 except ActionDenied as veto:
                     self.pending_text = None
                     state["denied"] = {

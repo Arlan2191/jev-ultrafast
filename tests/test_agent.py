@@ -429,7 +429,7 @@ def test_stuck_after_is_honoured(runner):
         {"max_steps": "5"},
         {"max_model_calls": 0},
         {"stuck_after": 0},
-        {"settle_ms": 0},
+        {"settle_ms": -1},
         {"autocomplete_settle_ms": -1},
         {"before_action": "nope"},
     ],
@@ -440,3 +440,61 @@ def test_construction_arguments_are_validated_before_a_browser_opens(kwargs, mon
     with pytest.raises(ValueError):
         Agent("https://example.test/", "goal", **kwargs)
     opened.assert_not_called()
+
+
+def test_hook_runs_per_attempt_on_stale_retry_with_same_text(runner, monkeypatch):
+    helper = Mock(return_value=("book", {"model": "test", "latency_ms": 10}))
+    monkeypatch.setattr(loop, "field_text", helper)
+    hook = Mock()
+    runner.before_action = hook
+    runner.state["browser"].act.side_effect = [StalePage("Changed before input"), None]
+    fingerprint_ = runner.state["page"]["fingerprint"]
+    with pytest.raises(StalePage):
+        runner.command("act", {"fingerprint": fingerprint_})
+    runner.state["decision"] = decision()
+    runner.command("act", {"fingerprint": fingerprint_})
+    assert hook.call_count == 2
+    assert [c.args[2] for c in hook.call_args_list] == ["book", "book"]
+    assert helper.call_count == 1
+    assert runner.state["browser"].act.call_count == 2
+    assert len(runner.state["history"]) == 1
+
+
+def test_mutating_hook_cannot_change_what_executes(runner, monkeypatch):
+    monkeypatch.setattr(loop, "field_text", Mock(return_value=("book", {"model": "test", "latency_ms": 10})))
+
+    def hook(action, page, text):
+        action["label"] = "Tampered"
+        action["node"] = 999
+        page["actions"].clear()
+
+    runner.before_action = hook
+    act(runner, "e1")
+    executed, page_arg = runner.state["browser"].act.call_args.args[:2]
+    assert executed["label"] == "Search" and executed["node"] == 10
+    assert page_arg["actions"] and runner.state["history"][0]["action"] == "Search"
+
+
+@pytest.mark.parametrize("settle,auto", [(0, 0), (7, 123)])
+def test_settle_values_reach_the_observe_script(settle, auto, monkeypatch):
+    from jev_ultrafast import browser as browser_module
+
+    b = browser_module.Browser.__new__(browser_module.Browser)
+    b.settle_ms, b.autocomplete_settle_ms, b.session = settle, auto, "s"
+    b.after_input = {"kind": "click", "node": 1}
+    calls = []
+    monkeypatch.setattr(b, "call", lambda method, **params: calls.append((method, params)) or {})
+    monkeypatch.setattr(browser_module, "browser_operation", lambda _request: {"ok": True})
+    b.observe(screenshot=False)
+    expression = calls[0][1]["expression"]
+    assert expression.endswith(f',{settle},{auto})')
+    assert calls[0][1]["awaitPromise"] is True
+
+
+def test_zero_settle_is_accepted(monkeypatch):
+    browser = Mock()
+    browser.observe.return_value = page()
+    opened = Mock(return_value=browser)
+    monkeypatch.setattr(loop, "Browser", opened)
+    Agent("https://example.test/", "goal", settle_ms=0, autocomplete_settle_ms=0)
+    assert opened.call_args.kwargs == {"settle_ms": 0, "autocomplete_settle_ms": 0}
