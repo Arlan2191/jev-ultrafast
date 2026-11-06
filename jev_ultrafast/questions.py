@@ -7,7 +7,8 @@ its matching autocomplete suggestion selected. For date pickers, CLICK the field
 Set every requested filter/control; a matching result alone does not prove a requested filter was set.
 Do not toggle a checkbox, switch, or radio already in the requested state.
 Submit populated search fields before opening a result; a populated field alone is not an applied search.
-WAIT only when the needed control is absent/disabled, or submitted results are still loading.
+WAIT only when the needed control is absent/disabled, or content is still loading or streaming. WAIT waits
+until the page is settled (loaded, no request in flight, no change for a moment), so one WAIT covers a whole stream.
 If Search/Submit is visible and the required fields are ready, CLICK it immediately.
 Recent WAIT actions are not evidence of loading. Prefer a useful visible control over WAIT.
 Elements marked revealed_by "hover" are shown only while the pointer is over their row. CLICK on them is

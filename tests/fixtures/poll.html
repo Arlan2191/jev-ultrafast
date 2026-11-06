@@ -1,0 +1,11 @@
+<!doctype html><title>Poll</title>
+<button type="button" onclick="document.title = 'clicked'">Press me</button>
+<script>
+  // A page that polls forever: a fetch, then a timer armed from the promise continuation (not from a timer callback).
+  window.polls = 0;
+  setTimeout(async function poll() {
+    await fetch('/api/50');
+    window.polls++;
+    setTimeout(poll, 400);
+  }, 400);
+</script>

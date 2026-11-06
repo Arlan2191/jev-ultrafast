@@ -27,6 +27,8 @@ jobs:
       - run: uv run pytest
       - run: node --check jev_ultrafast/static/app.js
       - run: node --check jev_ultrafast/snapshot.js
+      - run: node --check jev_ultrafast/a11y.js
+      - run: node --check jev_ultrafast/waits.js
       - run: uv build
 
   browser:

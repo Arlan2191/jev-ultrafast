@@ -9,6 +9,7 @@ from .browser import Browser, Refused, StalePage, content_fingerprint
 from .keys import validate_keys, validate_urls
 from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS
+from .waits import MAX_WAITS, attribute_names, ignore_patterns
 
 TERMINAL = {"done", "blocked", "denied", "budget"}
 
@@ -36,10 +37,11 @@ class Agent:
     (default 2 * max_steps). Reaching either ends the run with status "budget" and state["stop_reason"].
     settle_ms / autocomplete_settle_ms cap the post-action wait; reveal_timeout_ms bounds how long a click waits
     for a hover-revealed control to appear after the pointer moves onto it (it is never pressed if it does not);
-    stuck_after unchanged non-wait steps in a row
-    end the run as "blocked"; so do stuck_after refused presses in a row (stop_reason "refused"). A refused press is
-    recorded in state["refused"] (never in history), shown to the model as a recent action with refused=true, and its
-    element is left out of the next choice while the page is unchanged.
+    stuck_after unchanged steps in a row end the run as "blocked" (a WAIT that was met, or that timed out while the
+    content changed, is not unchanged; a WAIT that timed out on an unchanged page is); so do stuck_after refused
+    presses in a row (stop_reason "refused"). A refused press is recorded in state["refused"] (never in history),
+    shown to the model as a recent action with refused=true, and its element is left out of the next choice while
+    the page is unchanged.
     before_action(action, page, text) runs before each execution attempt, with the final typed text, and receives
     copies, so changing them cannot change what executes. It can run more than once for one intended action if the
     page goes stale first, so keep it free of side effects or make it idempotent. Raise ActionDenied(reason) to
@@ -49,6 +51,21 @@ class Agent:
     navigation_timeout_ms bounds the wait for a new document after BACK, RELOAD or GOTO (the page is observed anyway).
     Key presses and navigation are browser mutations: they are logged, never retried, and go through before_action
     with kind "key" (action["key"], action["focused"]), "back", "reload" or "goto" (action["url"]).
+    WAIT waits (in code, without a model call) until the page is settled: the document is loaded, no fetch or
+    XMLHttpRequest is in flight, no short timer is pending and the DOM has been quiet for wait_quiet_ms, at most
+    wait_timeout_ms. It is recorded in history with waited_ms and met (false on timeout). After every other action,
+    if requests or short timers are pending, the same wait runs bounded by action_settle_timeout_ms (0 turns it off).
+    wait_for(kind, ...) runs one condition wait for the caller and returns its WaitResult; see README.
+    ignore_urls: substrings or compiled regexes for long-lived fetch or XMLHttpRequest URLs (long polls, beacons)
+    that no wait and no post-action trigger counts. wait_timer_ms (default 2000, 0 = off): a one-shot setTimeout of
+    at most this long that is pending when a wait begins holds it until it fires; timers armed later never do.
+    body_cap_ms: at most this long after a response's headers a fetch stops counting as in flight.
+    wait_ignore_attributes: attribute names (for example ("style",)) whose changes are not DOM activity.
+    wait_interactive_grace_ms: how long a document may stay "interactive" before it counts as loaded.
+    A WAIT goes through before_action like any action.
+    new_window: None (default) gives the owned tab a window of its own only in headless Chrome, where a background
+    tab is throttled to about one frame per second after its first clicks; True or False force it. Headed Chrome
+    has not been tested, and a new window there is a visible one.
     """
 
     def __init__(
@@ -68,6 +85,15 @@ class Agent:
         keys=(),
         urls=None,
         navigation_timeout_ms=15000,
+        wait_quiet_ms=500,
+        wait_timeout_ms=30000,
+        action_settle_timeout_ms=5000,
+        new_window=None,
+        ignore_urls=(),
+        wait_timer_ms=2000,
+        body_cap_ms=30000,
+        wait_ignore_attributes=(),
+        wait_interactive_grace_ms=2000,
     ):
         task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
         if not task:
@@ -79,6 +105,16 @@ class Agent:
         positive_int("autocomplete_settle_ms", autocomplete_settle_ms, minimum=0)
         positive_int("reveal_timeout_ms", reveal_timeout_ms, minimum=0)
         positive_int("navigation_timeout_ms", navigation_timeout_ms)
+        positive_int("wait_quiet_ms", wait_quiet_ms, minimum=0)
+        positive_int("wait_timeout_ms", wait_timeout_ms)
+        positive_int("action_settle_timeout_ms", action_settle_timeout_ms, minimum=0)
+        positive_int("wait_timer_ms", wait_timer_ms, minimum=0)
+        positive_int("body_cap_ms", body_cap_ms)
+        positive_int("wait_interactive_grace_ms", wait_interactive_grace_ms, minimum=0)
+        if new_window is not None and type(new_window) is not bool:
+            raise ValueError("new_window must be True, False or None")
+        ignore_patterns(ignore_urls)
+        attribute_names(wait_ignore_attributes)
         keys = validate_keys(keys)
         urls = validate_urls(urls)
         if before_action is not None and not callable(before_action):
@@ -94,6 +130,15 @@ class Agent:
             keys=keys,
             urls=urls,
             navigation_timeout_ms=navigation_timeout_ms,
+            wait_quiet_ms=wait_quiet_ms,
+            wait_timeout_ms=wait_timeout_ms,
+            action_settle_timeout_ms=action_settle_timeout_ms,
+            new_window=new_window,
+            ignore_urls=ignore_urls,
+            wait_timer_ms=wait_timer_ms,
+            body_cap_ms=body_cap_ms,
+            wait_ignore_attributes=wait_ignore_attributes,
+            wait_interactive_grace_ms=wait_interactive_grace_ms,
         )
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
@@ -112,6 +157,7 @@ class Agent:
             stop_reason=None,
             denied=None,
             refused=[],
+            waits=[],
             plan=plan,
             plan_index=0,
             decisions=[],
@@ -129,6 +175,21 @@ class Agent:
             **{k: v for k, v in self.state.items() if k != "browser"},
             "elements": action_space(self.state["page"]["actions"])[0],
         }
+
+    WAITS = ("dom_quiet", "network_idle", "settled", "element", "text", "text_stable")
+
+    def wait_for(self, kind, *args, **kwargs):
+        """Run one condition wait in code, with no model call: dom_quiet, network_idle, settled, element, text or
+        text_stable (arguments as on Browser, each with timeout_ms). Returns a WaitResult(met, waited_ms, reason)
+        and never raises on timeout. The result is also appended to state["waits"] (the last 100)."""
+        if kind not in self.WAITS:
+            raise ValueError(f"Unknown wait {kind!r}; use one of {', '.join(self.WAITS)}")
+        result = getattr(self.browser, kind)(*args, **kwargs)
+        self.browser.mark_activity()
+        waits = self.state.setdefault("waits", [])
+        waits.append({"kind": kind, **result.as_dict()})
+        del waits[:-MAX_WAITS]
+        return result
 
     def command(self, name, body=None):
         body = body or {}
@@ -234,7 +295,7 @@ class Agent:
                     return self.stop("denied")
             # Browser.act checks freshness immediately before input, including after text generation.
             try:
-                state["browser"].act(action, page, text=text)
+                outcome = state["browser"].act(action, page, text=text)
             except Refused as refusal:
                 # Nothing was pressed (or sent): not history, but the model and stuck_after must see it.
                 refused = state.setdefault("refused", [])
@@ -257,6 +318,7 @@ class Agent:
             self.pending_text = None
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             # Record execution before observing. A stale post-action observation must not erase the action.
+            waited = outcome.get("wait") if isinstance(outcome, dict) else None
             state["history"].append(
                 {
                     "step": len(state["history"]) + 1,
@@ -277,6 +339,7 @@ class Agent:
                     "usage": decision["usage"],
                     "executed_ms": round((time.perf_counter() - state["started_at"]) * 1000),
                     "elapsed_ms": state["elapsed_ms"],
+                    **({"waited_ms": waited["waited_ms"], "met": waited["met"]} if waited else {}),
                 }
             )
             state["page"] = state["browser"].observe(screenshot=self.screenshots)
@@ -296,7 +359,10 @@ class Agent:
             state["status"] = (
                 "blocked"
                 if len(repeated) == self.stuck_after
-                and all(h["content_changed"] is False and h["kind"] != "wait" for h in repeated)
+                and all(
+                    h["content_changed"] is False and (h["kind"] != "wait" or h.get("met") is False)
+                    for h in repeated
+                )
                 else "ready"
             )
         else:

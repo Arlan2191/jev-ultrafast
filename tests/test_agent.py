@@ -500,7 +500,7 @@ def test_settle_values_reach_the_observe_script(settle, auto, monkeypatch):
     monkeypatch.setattr(browser_module, "browser_operation", lambda _request: {"ok": True})
     b.observe(screenshot=False)
     expression = calls[0][1]["expression"]
-    assert expression.endswith(f',{settle},{auto})')
+    assert f',{settle},{auto},{{' in expression and expression.endswith('})')
     assert calls[0][1]["awaitPromise"] is True
 
 
@@ -517,6 +517,15 @@ def test_zero_settle_is_accepted(monkeypatch):
         "keys": (),
         "urls": {},
         "navigation_timeout_ms": 15000,
+        "wait_quiet_ms": 500,
+        "wait_timeout_ms": 30000,
+        "action_settle_timeout_ms": 5000,
+        "new_window": None,
+        "ignore_urls": (),
+        "wait_timer_ms": 2000,
+        "body_cap_ms": 30000,
+        "wait_ignore_attributes": (),
+        "wait_interactive_grace_ms": 2000,
     }
 
 
@@ -1015,6 +1024,7 @@ def test_key_action_sends_the_cdp_events_and_not_a_browser_operation(monkeypatch
 
     b = bare_browser()
     b.fresh = Mock(return_value=True)
+    b.mark_action = Mock()
     operation = Mock()
     monkeypatch.setattr(browser, "browser_operation", operation)
     b.act({"id": "key:Shift+Tab", "kind": "key", "key": "Shift+Tab"}, page())
