@@ -31,7 +31,8 @@ def load_environment():
 
 def response_state():
     state = AGENT.snapshot() if AGENT else {"page": None, "status": "idle", "history": [], "decision": None}
-    return {**state, "text_model": os.environ.get("TEXT_MODEL", "deepseek-chat"), "max_steps": MAX_STEPS}
+    max_steps = AGENT.max_steps if AGENT else MAX_STEPS
+    return {**state, "text_model": os.environ.get("TEXT_MODEL", "deepseek-chat"), "max_steps": max_steps}
 
 
 def close_browser():

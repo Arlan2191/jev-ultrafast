@@ -7,8 +7,8 @@ from unittest.mock import Mock
 
 import pytest
 
+from jev_ultrafast import ActionDenied, Agent, model
 from jev_ultrafast import agent as loop
-from jev_ultrafast import model
 from jev_ultrafast.browser import StalePage, browser_operation, fingerprint
 
 
@@ -162,6 +162,7 @@ def runner():
     a = loop.Agent.__new__(loop.Agent)
     a.screenshots = False
     a.pending_text = None
+    a.max_steps, a.max_model_calls, a.stuck_after, a.before_action = 60, 120, 3, None
     p = page()
     a.state = {
         "browser": Mock(fresh=Mock(return_value=True), observe=Mock(return_value=p)),
@@ -318,3 +319,182 @@ def test_navigation_during_prediction_reobserves_without_action(runner):
     assert runner.state["status"] == "ready"
     assert runner.state["decision"] is None
     runner.state["browser"].act.assert_not_called()
+
+
+def act(runner, name="e3"):
+    runner.state["decision"] = decision(name)
+    return runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+
+
+def test_max_steps_ends_the_run_as_budget_without_a_third_action(runner):
+    runner.max_steps = 2
+    act(runner)
+    runner.state["page"]["fingerprint"] = runner.state["browser"].observe.return_value["fingerprint"]
+    act(runner)
+    snapshot = act(runner)
+    assert snapshot["status"] == "budget" and snapshot["stop_reason"] == "max_steps"
+    assert runner.state["browser"].act.call_count == 2
+    assert len(runner.state["history"]) == 2
+
+
+def test_model_call_cap_counts_text_calls_and_never_exceeds_the_cap(runner, monkeypatch):
+    helper = Mock(return_value=("book", {"model": "test", "latency_ms": 10}))
+    monkeypatch.setattr(loop, "field_text", helper)
+    chooser = Mock(return_value=decision("e3"))
+    monkeypatch.setattr(loop, "choose", chooser)
+    runner.max_model_calls = 2
+    runner.state["decisions"] = [{}]  # one decision already spent
+    snapshot = act(runner, "e1")  # TYPE_TEXT: the text call is the second and last allowed call
+    assert helper.call_count == 1 and snapshot["status"] == "ready"
+    runner.state["status"] = "ready"
+    snapshot = runner.command("predict", {})
+    assert snapshot["status"] == "budget" and snapshot["stop_reason"] == "max_model_calls"
+    chooser.assert_not_called()
+
+
+def test_text_call_that_would_exceed_the_cap_is_never_made(runner, monkeypatch):
+    helper = Mock(return_value=("book", {"model": "test", "latency_ms": 10}))
+    monkeypatch.setattr(loop, "field_text", helper)
+    runner.max_model_calls = 1
+    runner.state["decisions"] = [{}]
+    snapshot = act(runner, "e1")
+    assert snapshot["status"] == "budget" and snapshot["stop_reason"] == "max_model_calls"
+    helper.assert_not_called()
+    runner.state["browser"].act.assert_not_called()
+
+
+def test_tick_returns_budget_instead_of_raising(runner, monkeypatch):
+    monkeypatch.setattr(loop, "choose", Mock(return_value=decision("e3")))
+    runner.max_model_calls = 1
+    runner.state["decisions"] = [{}]
+    assert runner.command("tick")["status"] == "budget"
+    assert list(runner.run()) == []
+
+
+def test_before_action_veto_executes_nothing(runner):
+    seen = []
+
+    def hook(action, page, text):
+        seen.append((action["label"], text))
+        raise ActionDenied("no go")
+
+    runner.before_action = hook
+    snapshot = act(runner)
+    assert snapshot["status"] == "denied"
+    assert snapshot["denied"] == {"reason": "no go", "action": "Go", "kind": "click", "choice": "e3"}
+    assert seen == [("Go", None)]
+    runner.state["browser"].act.assert_not_called()
+    assert runner.state["history"] == [] and runner.pending_text is None
+    with pytest.raises(ValueError, match="stopped"):
+        runner.command("predict", {})
+
+
+def test_before_action_sees_generated_text_and_allow_executes(runner, monkeypatch):
+    monkeypatch.setattr(loop, "field_text", Mock(return_value=("book", {"model": "test", "latency_ms": 10})))
+    hook = Mock()
+    runner.before_action = hook
+    act(runner, "e1")
+    assert hook.call_args.args[2] == "book"
+    runner.state["browser"].act.assert_called_once()
+    assert len(runner.state["history"]) == 1
+
+
+def test_before_action_not_called_for_done(runner):
+    runner.before_action = Mock()
+    runner.state["decision"] = {**decision("DONE"), "choice": "DONE"}
+    assert runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})["status"] == "done"
+    runner.before_action.assert_not_called()
+
+
+def test_other_hook_exceptions_propagate(runner):
+    runner.before_action = Mock(side_effect=KeyError("bug"))
+    with pytest.raises(KeyError):
+        act(runner)
+    runner.state["browser"].act.assert_not_called()
+
+
+def test_stuck_after_is_honoured(runner):
+    runner.stuck_after = 2
+    runner.state["page"] = runner.state["browser"].observe.return_value
+    act(runner)
+    assert runner.state["status"] == "ready"
+    assert act(runner)["status"] == "blocked"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_steps": 0},
+        {"max_steps": True},
+        {"max_steps": "5"},
+        {"max_model_calls": 0},
+        {"stuck_after": 0},
+        {"settle_ms": -1},
+        {"autocomplete_settle_ms": -1},
+        {"before_action": "nope"},
+    ],
+)
+def test_construction_arguments_are_validated_before_a_browser_opens(kwargs, monkeypatch):
+    opened = Mock()
+    monkeypatch.setattr(loop, "Browser", opened)
+    with pytest.raises(ValueError):
+        Agent("https://example.test/", "goal", **kwargs)
+    opened.assert_not_called()
+
+
+def test_hook_runs_per_attempt_on_stale_retry_with_same_text(runner, monkeypatch):
+    helper = Mock(return_value=("book", {"model": "test", "latency_ms": 10}))
+    monkeypatch.setattr(loop, "field_text", helper)
+    hook = Mock()
+    runner.before_action = hook
+    runner.state["browser"].act.side_effect = [StalePage("Changed before input"), None]
+    fingerprint_ = runner.state["page"]["fingerprint"]
+    with pytest.raises(StalePage):
+        runner.command("act", {"fingerprint": fingerprint_})
+    runner.state["decision"] = decision()
+    runner.command("act", {"fingerprint": fingerprint_})
+    assert hook.call_count == 2
+    assert [c.args[2] for c in hook.call_args_list] == ["book", "book"]
+    assert helper.call_count == 1
+    assert runner.state["browser"].act.call_count == 2
+    assert len(runner.state["history"]) == 1
+
+
+def test_mutating_hook_cannot_change_what_executes(runner, monkeypatch):
+    monkeypatch.setattr(loop, "field_text", Mock(return_value=("book", {"model": "test", "latency_ms": 10})))
+
+    def hook(action, page, text):
+        action["label"] = "Tampered"
+        action["node"] = 999
+        page["actions"].clear()
+
+    runner.before_action = hook
+    act(runner, "e1")
+    executed, page_arg = runner.state["browser"].act.call_args.args[:2]
+    assert executed["label"] == "Search" and executed["node"] == 10
+    assert page_arg["actions"] and runner.state["history"][0]["action"] == "Search"
+
+
+@pytest.mark.parametrize("settle,auto", [(0, 0), (7, 123)])
+def test_settle_values_reach_the_observe_script(settle, auto, monkeypatch):
+    from jev_ultrafast import browser as browser_module
+
+    b = browser_module.Browser.__new__(browser_module.Browser)
+    b.settle_ms, b.autocomplete_settle_ms, b.session = settle, auto, "s"
+    b.after_input = {"kind": "click", "node": 1}
+    calls = []
+    monkeypatch.setattr(b, "call", lambda method, **params: calls.append((method, params)) or {})
+    monkeypatch.setattr(browser_module, "browser_operation", lambda _request: {"ok": True})
+    b.observe(screenshot=False)
+    expression = calls[0][1]["expression"]
+    assert expression.endswith(f',{settle},{auto})')
+    assert calls[0][1]["awaitPromise"] is True
+
+
+def test_zero_settle_is_accepted(monkeypatch):
+    browser = Mock()
+    browser.observe.return_value = page()
+    opened = Mock(return_value=browser)
+    monkeypatch.setattr(loop, "Browser", opened)
+    Agent("https://example.test/", "goal", settle_ms=0, autocomplete_settle_ms=0)
+    assert opened.call_args.kwargs == {"settle_ms": 0, "autocomplete_settle_ms": 0}

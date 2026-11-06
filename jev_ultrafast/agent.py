@@ -1,6 +1,7 @@
 """The complete agent loop. Typed choices, observable state, bounded execution."""
 
 import base64
+import copy
 import time
 from pathlib import Path
 
@@ -8,15 +9,66 @@ from .browser import Browser, StalePage
 from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS
 
+TERMINAL = {"done", "blocked", "denied", "budget"}
+
+
+class ActionDenied(Exception):
+    """Raised by a before_action hook to veto an action. The action is never executed."""
+
+    def __init__(self, reason="Action denied"):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def positive_int(name, value, *, optional=False, minimum=1):
+    if optional and value is None:
+        return value
+    if type(value) is not int or value < minimum:
+        raise ValueError(f"{name} must be {'a positive' if minimum else 'a non-negative'} integer")
+    return value
+
 
 class Agent:
-    def __init__(self, url, goals, *, record_dir=None, screenshots=False):
+    """Run a goal on a page.
+
+    Budgets: max_steps bounds executed actions; max_model_calls bounds TypeSafe decisions plus text-helper calls
+    (default 2 * max_steps). Reaching either ends the run with status "budget" and state["stop_reason"].
+    settle_ms / autocomplete_settle_ms cap the post-action wait; stuck_after unchanged non-wait steps in a row
+    end the run as "blocked".
+    before_action(action, page, text) runs before each execution attempt, with the final typed text, and receives
+    copies, so changing them cannot change what executes. It can run more than once for one intended action if the
+    page goes stale first, so keep it free of side effects or make it idempotent. Raise ActionDenied(reason) to
+    veto: a veto always prevents execution and the run ends as "denied".
+    """
+
+    def __init__(
+        self,
+        url,
+        goals,
+        *,
+        record_dir=None,
+        screenshots=False,
+        max_steps=MAX_STEPS,
+        max_model_calls=None,
+        settle_ms=50,
+        autocomplete_settle_ms=200,
+        stuck_after=3,
+        before_action=None,
+    ):
         task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
         if not task:
             raise ValueError("Supply a task")
+        self.max_steps = positive_int("max_steps", max_steps)
+        self.max_model_calls = positive_int("max_model_calls", max_model_calls, optional=True) or self.max_steps * 2
+        self.stuck_after = positive_int("stuck_after", stuck_after)
+        positive_int("settle_ms", settle_ms, minimum=0)
+        positive_int("autocomplete_settle_ms", autocomplete_settle_ms, minimum=0)
+        if before_action is not None and not callable(before_action):
+            raise ValueError("before_action must be callable")
+        self.before_action = before_action
         plan = [task]
         self.pending_text = None
-        self.browser = Browser(url)
+        self.browser = Browser(url, settle_ms=settle_ms, autocomplete_settle_ms=autocomplete_settle_ms)
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
         try:
@@ -31,6 +83,8 @@ class Agent:
             decision=None,
             history=[],
             status="ready",
+            stop_reason=None,
+            denied=None,
             plan=plan,
             plan_index=0,
             decisions=[],
@@ -55,6 +109,8 @@ class Agent:
         if name == "tick":
             try:
                 self.command("predict", {})
+                if state["status"] in TERMINAL:
+                    return self.snapshot()
                 return self.command("act", {"fingerprint": state["page"]["fingerprint"]})
             except StalePage:
                 state["decision"] = None
@@ -70,10 +126,10 @@ class Agent:
             if not state["browser"].fresh(state["page"]):
                 state["page"] = state["browser"].observe(screenshot=self.screenshots)
             state["decision"] = None
-            if state["status"] in {"done", "blocked"}:
+            if state["status"] in TERMINAL:
                 raise ValueError("This run has stopped. Start a fresh demo.")
-            if len(state["decisions"]) >= MAX_STEPS * 2:
-                raise ValueError("Reached the demo's model-call budget")
+            if self.model_calls() >= self.max_model_calls:
+                return self.stop("budget", "max_model_calls")
             state["decision"] = choose(state["page"], state["goal"], state["history"])
             state["decisions"].append(
                 {
@@ -99,9 +155,8 @@ class Agent:
                 state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
                 return self.snapshot()
             action = next(a for a in page["actions"] if a["id"] == selected)
-            if len(state["history"]) >= MAX_STEPS:
-                state["status"] = "blocked"
-                raise ValueError(f"Stopped at the {MAX_STEPS}-action demo budget")
+            if len(state["history"]) >= self.max_steps:
+                return self.stop("budget", "max_steps")
             text, helper = None, None
             if action["kind"] == "fill":
                 if not state["browser"].fresh(page):
@@ -110,9 +165,23 @@ class Agent:
                 if self.pending_text and self.pending_text[0] == context:
                     _, text, helper = self.pending_text
                 else:
+                    if self.model_calls() >= self.max_model_calls:
+                        return self.stop("budget", "max_model_calls")
                     text, helper = field_text(context)
                     self.pending_text = (context, text, helper)
                     state["text_calls"].append({**helper, "field": action["label"], "value": text})
+            if self.before_action:
+                try:
+                    self.before_action(copy.deepcopy(action), copy.deepcopy(page), text)
+                except ActionDenied as veto:
+                    self.pending_text = None
+                    state["denied"] = {
+                        "reason": veto.reason,
+                        "action": action["label"],
+                        "kind": action["kind"],
+                        "choice": selected,
+                    }
+                    return self.stop("denied")
             # Browser.act checks freshness immediately before input, including after text generation.
             state["browser"].act(action, page, text=text)
             self.pending_text = None
@@ -150,18 +219,29 @@ class Agent:
                 (self.record_dir / f"{state['elapsed_ms']:06d}.jpg").write_bytes(
                     base64.b64decode(state["page"]["screenshot"])
                 )
-            repeated = state["history"][-3:]
+            repeated = state["history"][-self.stuck_after :]
             state["status"] = (
                 "blocked"
-                if len(repeated) == 3 and all(h["page_changed"] is False and h["kind"] != "wait" for h in repeated)
+                if len(repeated) == self.stuck_after
+                and all(h["page_changed"] is False and h["kind"] != "wait" for h in repeated)
                 else "ready"
             )
         else:
             raise ValueError("Unknown command")
         return self.snapshot()
 
+    def model_calls(self):
+        return len(self.state["decisions"]) + len(self.state["text_calls"])
+
+    def stop(self, status, reason=None):
+        state = self.state
+        state["status"] = status
+        state["stop_reason"] = reason
+        state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
+        return self.snapshot()
+
     def run(self):
-        while self.state["status"] not in {"done", "blocked"}:
+        while self.state["status"] not in TERMINAL:
             yield self.command("tick")
 
     def close(self):
