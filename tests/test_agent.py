@@ -1024,6 +1024,7 @@ def test_key_action_sends_the_cdp_events_and_not_a_browser_operation(monkeypatch
 
     b = bare_browser()
     b.fresh = Mock(return_value=True)
+    b.mark_action = Mock()
     operation = Mock()
     monkeypatch.setattr(browser, "browser_operation", operation)
     b.act({"id": "key:Shift+Tab", "kind": "key", "key": "Shift+Tab"}, page())

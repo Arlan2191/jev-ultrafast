@@ -1,5 +1,6 @@
 """Observed actions through Browser Harness; one CDP session, no per-step subprocess."""
 
+import contextlib
 import hashlib
 import json
 import sys
@@ -84,6 +85,7 @@ class Browser:
     wait_interactive_grace_ms = 2000
     navigation_timeout_ms = 15000
     activity_seen = None
+    action_mark = None
     ignore = []
     wait_ignore_attributes = ()
     tracker = TRACKER
@@ -120,6 +122,7 @@ class Browser:
         self.tracker = script("waits.js", __BODY_CAP_MS__=positive("body_cap_ms", body_cap_ms))
         self.last_action_settle = None
         self.activity_seen = None
+        self.action_mark = None
         self.keys = offered_keys(keys)
         self.urls = dict(urls or {})
         self.navigation_timeout_ms = navigation_timeout_ms
@@ -136,22 +139,28 @@ class Browser:
             version = cdp("Browser.getVersion")
             new_window = "HeadlessChrome" in f"{version.get('product', '')} {version.get('userAgent', '')}"
         self.new_window = bool(new_window)
-        self.target = cdp(
-            "Target.createTarget", url="about:blank", background=True, newWindow=self.new_window
-        )["targetId"]
-        self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
-        self.call("Emulation.setDeviceMetricsOverride", width=1120, height=780, deviceScaleFactor=1, mobile=False)
-        # Keep rAF/menus rendering in an owned background tab, without activating the user's Chrome tab.
-        self.call("Emulation.setFocusEmulationEnabled", enabled=True)
-        # The tracker must exist before the page's own scripts run, so it sees their requests and timers.
-        self.call("Page.addScriptToEvaluateOnNewDocument", source=self.tracker)
-        self.call("Page.navigate", url=url)
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            if self.evaluate("document.readyState") == "complete":
-                break
-            time.sleep(0.02)
-        self.mark_activity()
+        self.target = None
+        try:
+            self.target = cdp(
+                "Target.createTarget", url="about:blank", background=True, newWindow=self.new_window
+            )["targetId"]
+            self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
+            self.call("Emulation.setDeviceMetricsOverride", width=1120, height=780, deviceScaleFactor=1, mobile=False)
+            # Keep rAF/menus rendering in an owned background tab, without activating the user's Chrome tab.
+            self.call("Emulation.setFocusEmulationEnabled", enabled=True)
+            # The tracker must exist before the page's own scripts run, so it sees their requests and timers.
+            self.call("Page.addScriptToEvaluateOnNewDocument", source=self.tracker)
+            self.call("Page.navigate", url=url)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if self.evaluate("document.readyState") == "complete":
+                    break
+                time.sleep(0.02)
+            self.mark_activity()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                self.close()  # Do not leak the owned tab when setup fails.
+            raise
 
     def call(self, method, **params):
         return cdp(method, session_id=self.session, **params)
@@ -248,6 +257,7 @@ class Browser:
             return {"executed": action["id"], "wait": result.as_dict()}
         if not self.fresh(page, action):
             raise StalePage("Page changed since this decision. Observe again.")
+        self.mark_action()
         if action["kind"] in NAVIGATION:
             self.navigate(action)
             self.after_input = action
@@ -302,7 +312,7 @@ class Browser:
 
     def activity_spec(self):
         """What the page-side counters need: the baseline to count from, the ignore list and the timer threshold."""
-        seen = self.activity_seen or {}
+        seen = self.action_mark or self.activity_seen or {}
         return {
             "epoch": seen.get("epoch"),
             "since": seen.get("seq", 0),
@@ -319,23 +329,33 @@ class Browser:
         except (StalePage, RuntimeError, TimeoutError):
             return None
 
+    def mark_action(self):
+        """Baseline of the post-action trigger: the tracker's position right before the input is sent, so only what
+        the action itself starts counts (not what a polling page did while the model was thinking). One tiny read."""
+        self.action_mark = None
+        try:
+            self.action_mark = self.evaluate("(window.__jevWait?.mark() ?? null)")
+        except (StalePage, RuntimeError, TimeoutError):
+            pass
+
     def mark_activity(self):
         """Everything up to now is accounted for; the next action only reacts to what starts after this."""
         self.activity_seen = self.activity()
 
     def settle_after_action(self, activity):
         """After an action's fixed settle: if counted requests or short timers are pending (or a request started or a
-        timer was armed since the last read), wait for the page to settle, bounded by action_settle_timeout_ms. Adds
+        timer was armed since the action began), wait for the page to settle, bounded by action_settle_timeout_ms. Adds
         no round trip when nothing is pending."""
         self.last_action_settle = None
         if activity and self.action_settle_timeout_ms and needs_settle(activity):
-            seen = self.activity_seen or {}
+            seen = self.action_mark or self.activity_seen or {}
             self.last_action_settle = self.settled(
                 self.action_settle_quiet_ms,
                 self.action_settle_timeout_ms,
                 timers_since={"epoch": seen.get("epoch"), "since": seen.get("seq", 0)},
             )
             activity = self.activity()
+        self.action_mark = None
         self.activity_seen = activity
 
     def _spec(self, kind, ignore_urls=(), **fields):
@@ -358,7 +378,7 @@ class Browser:
             response = self.call("Runtime.evaluate", expression=f"({self.tracker}).{call}", **extra)
         return response
 
-    def _after_error(self, document, deadline):
+    def _after_error(self, deadline):
         """A slice failed (the page navigated, or is too busy to answer). Wait, bounded by navigation_timeout_ms and
         the deadline, until the page answers with a document that has started to load; then slice again. A transient
         error on the same document returns at once."""
@@ -369,9 +389,8 @@ class Browser:
             except (StalePage, RuntimeError, TimeoutError):
                 now = None
             if now and now[2] != "loading":
-                return now[:2]
+                return
             time.sleep(0.02)
-        return document
 
     def _wait(self, spec, timeout_ms):
         """Run a page-side condition in slices until it holds or timeout_ms passes. Never raises on timeout, and a
@@ -379,7 +398,7 @@ class Browser:
         start = time.monotonic()
         deadline = start + timeout_ms / 1000
         spec = {**spec, "key": uuid.uuid4().hex}
-        document, reason = None, "timeout"
+        reason = "timeout"
         while True:
             remaining_ms = (deadline - time.monotonic()) * 1000
             request = {**spec, "slice_ms": max(0, min(WAIT_SLICE_MS, remaining_ms))}
@@ -396,10 +415,10 @@ class Browser:
             if outcome and outcome["met"]:
                 return WaitResult(True, round((time.monotonic() - start) * 1000), outcome["reason"])
             if outcome:
-                document, reason = outcome["document"], outcome["reason"]
+                reason = outcome["reason"]
             else:
                 reason = "the page is navigating"
-                document = self._after_error(document, deadline)
+                self._after_error(deadline)
                 time.sleep(0.02)
             if time.monotonic() >= deadline:
                 return WaitResult(False, round((time.monotonic() - start) * 1000), f"timeout: {reason}")

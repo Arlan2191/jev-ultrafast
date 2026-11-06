@@ -259,6 +259,45 @@ def test_a_plain_click_on_a_polling_page_does_not_wait_for_the_pages_own_timers(
     assert agent.browser.last_action_settle is None and (time.monotonic() - began) < 1.5
 
 
+def slow_model(monkeypatch, delay):
+    """The model call between the read and the action: seconds with a real model."""
+    real = loop.choose
+
+    def choose(*args, **kwargs):
+        time.sleep(delay)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "choose", choose)
+
+
+def test_a_slow_model_between_the_read_and_a_click_does_not_make_the_click_wait_for_the_pages_polling(
+    start, monkeypatch
+):
+    stub(monkeypatch, [("CLICK", "Press me")])
+    slow_model(monkeypatch, 1.5)  # poll.html arms a 400 ms timer and a request all the time.
+    agent = start("poll.html", ignore_urls=["/api/50"], max_steps=1)
+    began = time.monotonic()
+    agent.command("tick")
+    assert agent.browser.last_action_settle is None
+    assert (time.monotonic() - began) < 3.0  # The 1.5 s model call and a plain click, no settle on top.
+
+
+def test_a_timer_the_click_arms_still_triggers_the_settle(start, monkeypatch):
+    stub(monkeypatch, [("CLICK", "Arm")])
+    slow_model(monkeypatch, 0.5)
+    agent = start("timer_click.html", max_steps=1)
+    agent.command("tick")
+    assert agent.browser.last_action_settle is not None and agent.browser.last_action_settle.met is True
+    assert agent.browser.evaluate("document.title") == "done"
+
+
+def test_the_start_of_a_new_document_is_not_counted_as_a_recent_request(open_page):
+    browser = open_page("blank.html")
+    # Nothing ran: the quiet period is already over, whatever idle_ms is.
+    result = browser.network_idle(idle_ms=60000, timeout_ms=1000)
+    assert result.met is True, result
+
+
 # DOM attribute noise and a document that stays "interactive" (S9).
 
 

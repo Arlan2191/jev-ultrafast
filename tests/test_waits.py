@@ -487,7 +487,7 @@ def test_the_wait_for_a_document_after_an_error_is_bounded_by_the_navigation_tim
     b.navigation_timeout_ms = 120
     b.call = Mock(side_effect=RuntimeError("Execution context was destroyed."))
     started = time.monotonic()
-    assert b._after_error([1, "a"], time.monotonic() + 30) == [1, "a"]
+    assert b._after_error(time.monotonic() + 30) is None
     assert time.monotonic() - started < 1  # Not the 30 s that remain of the wait.
 
 
@@ -654,3 +654,45 @@ def test_a_vetoed_wait_is_not_executed(runner):
     runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
     runner.state["browser"].act.assert_not_called()
     assert runner.state["status"] == "denied"
+
+
+# R2-1: the post-action trigger counts from the action, not from the previous read.
+
+
+def test_the_action_baseline_is_read_after_the_freshness_check_and_before_the_input(monkeypatch):
+    order = []
+    b = bare()
+    b.fresh = Mock(side_effect=lambda *a, **k: order.append("fresh") or True)
+    b.evaluate = Mock(side_effect=lambda expression: order.append("mark") or {"epoch": "e1", "seq": 40})
+    b.call = Mock(side_effect=lambda method, **p: order.append(method) or {})
+    b.activity_seen = {"epoch": "e1", "seq": 3}
+    b.act({"id": "key:Tab", "kind": "key", "key": "Tab"}, page())
+    assert order[:2] == ["fresh", "mark"] and order[2] == "Input.dispatchKeyEvent"
+    assert b.activity_spec()["since"] == 40 and b.activity_spec()["epoch"] == "e1"
+
+
+def test_a_stale_action_does_not_move_the_baseline():
+    b = bare()
+    b.fresh = Mock(return_value=False)
+    b.evaluate = Mock()
+    b.activity_seen = {"epoch": "e1", "seq": 3}
+    with pytest.raises(browser_module.StalePage):
+        b.act({"id": "key:Tab", "kind": "key", "key": "Tab"}, page())
+    b.evaluate.assert_not_called()
+    assert b.activity_spec()["since"] == 3
+
+
+def test_the_settle_uses_the_action_baseline_and_clears_it():
+    b = settle_browser()
+    b.action_mark = {"epoch": "e1", "seq": 40}
+    b.settle_after_action(quiet(timers=1))
+    b.settled.assert_called_once_with(150, 5000, timers_since={"epoch": "e1", "since": 40})
+    assert b.action_mark is None
+
+
+def test_a_failed_baseline_read_falls_back_to_the_last_read():
+    b = bare()
+    b.activity_seen = {"epoch": "e1", "seq": 3}
+    b.evaluate = Mock(side_effect=RuntimeError("navigating"))
+    b.mark_action()
+    assert b.action_mark is None and b.activity_spec()["since"] == 3

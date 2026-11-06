@@ -17,7 +17,9 @@
   // its resource-timing entry (which Chrome does when the body was read to the end or cancelled), (3) XHR fires
   // loadend, (4) the response arrived but the page has not started to read the body UNREAD_BODY_MS later (Chrome
   // reports no entry for a body nobody reads), or (5) body_cap_ms after the response headers arrived.
+  // Only http(s) requests are counted: data: and blob: URLs touch no network and Chrome reports no entry for them.
   const begin = (url, kind) => {
+    if (!/^https?:/i.test(url)) return 0;
     const id = ++seq;
     w.inflight.set(id, {url, kind, timers: []});
     w.starts.push([id, url]);
@@ -28,13 +30,15 @@
     const entry = w.inflight.get(id);
     if (!entry) return;
     entry.timers.forEach(nativeClear);
-    w.stats[how]++;
+    entry.cleanup?.();
+    w.stats[how] = (w.stats[how] || 0) + 1;
     w.ends.push([entry.url, now()]);
     if (w.ends.length > MAX_ENDS) w.ends.shift();
     w.inflight.delete(id);
   };
   const absolute = value => {
-    try { const url = new URL(String(value), location.href); url.hash = ''; return url.href; } catch { return String(value); }
+    // Relative URLs resolve against the document base URL (<base href> included), as the browser does.
+    try { const url = new URL(String(value), document.baseURI); url.hash = ''; return url.href; } catch { return 'invalid:'; }
   };
   const wrap = (target, apply) => new Proxy(target, {apply});
 
@@ -58,28 +62,44 @@
     const id = begin(absolute(input instanceof Request ? input.url : input), 'fetch');
     let promise;
     try { promise = Reflect.apply(target, self, args); } catch (error) { end(id, 'rejected'); throw error; }
-    const signal = init?.signal ?? (input instanceof Request ? input.signal : null);
-    if (signal) signal.addEventListener('abort', () => end(id, 'abort'), {once: true});
-    promise.then(response => {
-      const entry = w.inflight.get(id);
-      if (!entry) return;
-      entry.timers.push(nativeSet(() => end(id, 'cap'), BODY_CAP_MS));
-      // bodyUsed is a plain getter: it says whether a read was requested, without touching the stream.
-      entry.timers.push(nativeSet(() => { if (!response.bodyUsed) end(id, 'unread'); }, Math.min(BODY_CAP_MS, UNREAD_BODY_MS)));
-    }, () => end(id, 'rejected'));
-    return promise;
+    let signal = null;
+    try { signal = init?.signal ?? (input instanceof Request ? input.signal : null); } catch { /* the browser reports it */ }
+    const entry = w.inflight.get(id);
+    if (entry && typeof signal?.addEventListener === 'function') {
+      const onAbort = () => end(id, 'abort');
+      signal.addEventListener('abort', onAbort, {once: true});
+      entry.cleanup = () => signal.removeEventListener('abort', onAbort);
+    }
+    // A derived promise: it stays unhandled exactly when the page leaves its own unhandled (the page never sees the
+    // native promise, so attaching a handler to it here must not mark anything handled). It settles one microtask
+    // after the native one.
+    return promise.then(response => {
+      const open = w.inflight.get(id);
+      if (open) {
+        open.timers.push(nativeSet(() => end(id, 'cap'), BODY_CAP_MS));
+        // bodyUsed is a plain getter: it says whether a read was requested, without touching the stream.
+        open.timers.push(nativeSet(() => { if (!response.bodyUsed) end(id, 'unread'); }, Math.min(BODY_CAP_MS, UNREAD_BODY_MS)));
+      }
+      return response;
+    }, error => { end(id, 'rejected'); throw error; });
   });
 
   // XMLHttpRequest (asynchronous): in flight until loadend.
   const meta = new WeakMap(), xhr = XMLHttpRequest.prototype;
   xhr.open = wrap(xhr.open, (target, self, args) => {
-    meta.set(self, {url: absolute(args[1]), async: args[2] !== false});
+    // open() abandons a request still in flight on this object without any event: end it here.
+    const previous = meta.get(self);
+    if (previous?.id) end(previous.id, 'abort');
+    meta.set(self, {url: absolute(args[1]), async: args[2] !== false, id: 0});
     return Reflect.apply(target, self, args);
   });
   xhr.send = wrap(xhr.send, (target, self, args) => {
     const info = meta.get(self);
     if (!info?.async) return Reflect.apply(target, self, args);
     const id = begin(info.url, 'xmlhttprequest');
+    info.id = id;
+    const open = w.inflight.get(id);
+    if (open) open.timers.push(nativeSet(() => end(id, 'cap'), BODY_CAP_MS));
     self.addEventListener('loadend', () => end(id, 'loadend'), {once: true});
     try { return Reflect.apply(target, self, args); } catch (error) { end(id, 'rejected'); throw error; }
   });
@@ -107,7 +127,7 @@
     let id;
     const wrapped = function () { w.timers.delete(id); return callback.apply(this, arguments); };
     id = Reflect.apply(target, self, [wrapped, wait, ...rest]);
-    w.timers.set(id, {delay: Math.max(0, wait), seq: ++seq});
+    w.timers.set(id, {delay: Math.max(0, Number(delay) >> 0), seq: ++seq}); // 32-bit, like the browser
     return id;
   });
   for (const method of ['clearTimeout', 'clearInterval']) {
@@ -163,7 +183,7 @@
       const open = counted(spec).length;
       if (open) return open + ' request(s) in flight';
       const skip = ignored(spec);
-      const last = Math.max(0, ...w.ends.filter(([url]) => !skip(url)).map(([, at]) => at));
+      const last = Math.max(-Infinity, ...w.ends.filter(([url]) => !skip(url)).map(([, at]) => at));
       return now() - last >= spec.idle_ms ? null : 'a request finished less than ' + spec.idle_ms + ' ms ago';
     },
     settled(spec) {
@@ -209,6 +229,8 @@
       new_started: w.starts.filter(([id, url]) => id > since && !skip(url)).length,
       timers: shortTimers(spec, since).length};
   };
+  // Where the tracker stands right now: the post-action trigger counts only what starts after this point.
+  w.mark = () => ({epoch: w.epoch, seq});
   w.document = () => [performance.timeOrigin, location.href];
   // One slice of a wait: resolves when the condition holds, or after slice_ms with the reason it does not. The
   // first slice of a wait fixes which timers can hold it.

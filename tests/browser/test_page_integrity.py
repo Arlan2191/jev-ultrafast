@@ -112,7 +112,123 @@ def test_a_streamed_fetch_whose_body_completes_releases_the_counter(open_page):
     assert stream.evaluate("window.__jevWait.stats.entry") >= 1
 
 
+def test_a_relative_url_resolves_against_the_base_href(open_page):
+    browser = open_page("base.html")  # <base href="/api/">: fetch('0') is /api/0, not /0
+    run(browser, "fetch('0').then(r => r.text())")
+    assert until(lambda: inflight(browser) == 0, 1), "a read body was held because its URL never paired"
+    assert browser.evaluate("window.__jevWait.stats.entry") == 1
+    assert browser.network_idle(idle_ms=100, timeout_ms=1000).met is True
+
+
+def test_data_and_blob_requests_are_not_counted(blank):
+    seen = run(
+        blank,
+        """(async () => {
+          const out = {};
+          const urls = {data: 'data:text/plain,hi', blob: URL.createObjectURL(new Blob(['hi']))};
+          for (const [label, url] of Object.entries(urls)) {
+            const promise = fetch(url);
+            out[label] = window.__jevWait.inflight.size;  // Right after the call.
+            await (await promise).text();
+          }
+          return out;
+        })()""",
+    )
+    assert seen == {"data": 0, "blob": 0}
+    assert inflight(blank) == 0
+
+
+def test_chrome_resource_timing_for_data_and_blob_urls_is_recorded(blank):
+    """A measurement, not a gate: does Chrome report resource-timing entries for data: and blob: fetches?"""
+    rows = run(
+        blank,
+        """new Promise(resolve => {
+          const names = [];
+          new PerformanceObserver(list => {
+            for (const e of list.getEntries()) names.push([e.initiatorType, e.name.split(':')[0]]);
+          }).observe({type: 'resource', buffered: false});
+          (async () => {
+            await (await fetch('data:text/plain,hi')).text();
+            await (await fetch(URL.createObjectURL(new Blob(['hi'])))).text();
+            await (await fetch('/api/0')).text();
+            setTimeout(() => resolve(names), 300);
+          })();
+        })""",
+    )
+    report = "### Resource-timing entries by scheme (headless Chrome): " + json.dumps(rows)
+    print(report)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a") as handle:
+            handle.write(report + "\n\n")
+    assert ["fetch", "http"] in rows  # The control: the network request is reported.
+
+
+def test_an_unhandled_fetch_rejection_still_reaches_the_page_once(blank):
+    count = run(
+        blank,
+        """new Promise(resolve => {
+          let n = 0;
+          addEventListener('unhandledrejection', event => { n++; event.preventDefault(); });
+          fetch('http://127.0.0.1:1/');
+          setTimeout(() => resolve(n), 600);
+        })""",
+    )
+    assert count == 1
+    assert until(lambda: inflight(blank) == 0, 2)
+
+
+def test_a_handled_fetch_rejection_stays_handled(blank):
+    count = run(
+        blank,
+        """new Promise(resolve => {
+          let n = 0;
+          addEventListener('unhandledrejection', () => n++);
+          fetch('http://127.0.0.1:1/').catch(() => {});
+          setTimeout(() => resolve(n), 600);
+        })""",
+    )
+    assert count == 0
+
+
+def test_a_malformed_call_rejects_like_the_native_fetch_instead_of_throwing(blank):
+    value = run(
+        blank,
+        """(async () => {
+          const out = [];
+          const calls = [() => fetch('/api/0', {signal: {}}), () => fetch({toString() { throw new Error('x'); }})];
+          for (const call of calls) {
+            let promise;
+            try { promise = call(); } catch { out.push('threw'); continue; }
+            try { await promise; out.push('resolved'); } catch { out.push('rejected'); }
+          }
+          return out;
+        })()""",
+    )
+    assert value == ["rejected", "rejected"]
+
+
 # XMLHttpRequest
+
+
+def test_reopening_an_xhr_in_flight_ends_the_abandoned_request(blank):
+    run(
+        blank,
+        """new Promise(resolve => {
+          const x = new XMLHttpRequest();
+          x.open('GET', '/hang'); x.send();
+          x.open('GET', '/api/0'); x.onloadend = () => resolve(1); x.send();
+        })""",
+    )
+    assert until(lambda: inflight(blank) == 0, 2), "the first request kept the counter up"
+
+
+def test_an_xhr_that_never_finishes_is_released_by_the_cap(capped):
+    browser = capped(800)
+    run(browser, "(() => { const x = new XMLHttpRequest(); x.open('GET', '/hang'); x.send(); return 1; })()")
+    assert inflight(browser) == 1
+    assert until(lambda: inflight(browser) == 0, 3)
+    assert browser.evaluate("window.__jevWait.stats.cap") == 1
 
 
 def test_xhr_behaviour_is_preserved(blank):

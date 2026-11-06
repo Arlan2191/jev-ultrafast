@@ -139,3 +139,6 @@ def test_one_click_tick_breakdown(open_page, fixture_base_url, monkeypatch, new_
         with open(summary, "a") as handle:
             handle.write(report + "\n\n")
     assert statistics.median(ticks) < 5000
+    if new_window is not False:
+        # Back to 1 s ticks (the throttled background tab) would show here; CI measures about 50 ms.
+        assert statistics.median(ticks) < 300, ticks
