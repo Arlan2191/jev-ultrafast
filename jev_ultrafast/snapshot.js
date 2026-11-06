@@ -17,8 +17,7 @@
   // anything between it and the control) is fixed or a dialog or popover, or the layer alone covers over a quarter
   // of the viewport. The host itself may be any size: a message that hosts a toolbar is often tall.
   const overlay = n => getComputedStyle(n).position==='fixed' || n.tagName==='DIALOG' ||
-    ['dialog','alertdialog'].includes(n.getAttribute('role')) || n.getAttribute('aria-modal')==='true' ||
-    n.hasAttribute('popover');
+    ['dialog','alertdialog'].includes(n.getAttribute('role'));
   const revealHost = e => {
     let layer=e;
     while (layer && getComputedStyle(layer).opacity!=='0') layer=layer.parentElement;
