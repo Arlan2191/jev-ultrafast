@@ -82,6 +82,16 @@
     const scope=e.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || e.parentElement;
     return [...guard,scope?.innerText?.slice(0,6000)||''];
   };
+  // The element that has keyboard focus, if it is not the document itself. A key press is only valid while this
+  // identity and guard still match what was observed. A password, file or hidden input is never read: its guard
+  // is identity, type and accessible name only, so no value can enter the observation through focus.
+  cache.focused=()=>{
+    const e=document.activeElement;
+    if (!e || e===document.body || e===document.documentElement) return null;
+    const guard=safe(e) ? cache.guard(e) : (shown(e) ? [identity(e),e.type,name(e)] : null);
+    return {node:identity(e),role:role(e),label:name(e)||e.tagName.toLowerCase(),href:e.getAttribute('href'),
+      tag:e.tagName.toLowerCase(),type:e.type??null,guard};
+  };
   // Controls that only appear while the pointer is over their row come after every visible control,
   // so they can never push a visible one past the cap.
   const actions=[], revealed=[];
@@ -95,6 +105,7 @@
     const base={node:identity(e),role:rname,label:name(e)||rname,
       rect:{x:r.x,y:r.y,w:r.width,h:r.height}};
     if (reveal) base.revealed_by='hover';
+    if (e===document.activeElement) base.focused=true;
     // Only these elements are offered the HOVER operation (a revealed control always is).
     if (e.getAttribute('aria-haspopup') && e.getAttribute('aria-haspopup')!=='false' ||
         e.hasAttribute('aria-expanded') || e.getAttribute('title')?.trim() || e.hasAttribute('aria-describedby'))
@@ -144,5 +155,6 @@
   if (scrollY>0) actions.push({id:'scroll_up',kind:'scroll',label:'Scroll up',delta:-560});
   actions.push({id:'wait',kind:'wait',label:'Wait for the page to update'});
   return {url:location.href,title:document.title,w:innerWidth,h:innerHeight,text,
-    scroll:{y:scrollY,height},actions,marker,page_key,guards,omitted_actions};
+    scroll:{y:scrollY,height},actions,marker,page_key,guards,omitted_actions,
+    focus:cache.focused(),history_length:history.length};
 })()

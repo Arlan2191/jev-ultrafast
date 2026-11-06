@@ -5,7 +5,8 @@ import copy
 import time
 from pathlib import Path
 
-from .browser import Browser, Refused, StalePage
+from .browser import Browser, Refused, StalePage, content_fingerprint
+from .keys import validate_keys, validate_urls
 from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS
 
@@ -43,6 +44,11 @@ class Agent:
     copies, so changing them cannot change what executes. It can run more than once for one intended action if the
     page goes stale first, so keep it free of side effects or make it idempotent. Raise ActionDenied(reason) to
     veto: a veto always prevents execution and the run ends as "denied".
+    keys: extra shortcut chords the caller declares, e.g. ("Control+K",); the fixed keys (Enter, Escape, Tab, ...) are
+    always offered. urls: {name: absolute http(s) URL} pages the model may GOTO; it never writes a URL.
+    navigation_timeout_ms bounds the wait for a new document after BACK, RELOAD or GOTO (the page is observed anyway).
+    Key presses and navigation are browser mutations: they are logged, never retried, and go through before_action
+    with kind "key" (action["key"], action["focused"]), "back", "reload" or "goto" (action["url"]).
     """
 
     def __init__(
@@ -59,6 +65,9 @@ class Agent:
         reveal_timeout_ms=500,
         stuck_after=3,
         before_action=None,
+        keys=(),
+        urls=None,
+        navigation_timeout_ms=15000,
     ):
         task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
         if not task:
@@ -69,6 +78,9 @@ class Agent:
         positive_int("settle_ms", settle_ms, minimum=0)
         positive_int("autocomplete_settle_ms", autocomplete_settle_ms, minimum=0)
         positive_int("reveal_timeout_ms", reveal_timeout_ms, minimum=0)
+        positive_int("navigation_timeout_ms", navigation_timeout_ms)
+        keys = validate_keys(keys)
+        urls = validate_urls(urls)
         if before_action is not None and not callable(before_action):
             raise ValueError("before_action must be callable")
         self.before_action = before_action
@@ -79,6 +91,9 @@ class Agent:
             settle_ms=settle_ms,
             autocomplete_settle_ms=autocomplete_settle_ms,
             reveal_timeout_ms=reveal_timeout_ms,
+            keys=keys,
+            urls=urls,
+            navigation_timeout_ms=navigation_timeout_ms,
         )
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
@@ -145,9 +160,17 @@ class Agent:
             page = state["page"]
             refused = state.get("refused", [])
             # Drops by node: one refusal hides both the fill and the "Open <label>" click of the same element.
-            skip = {r["node"] for r in refused if r["fingerprint"] == page["fingerprint"]}
-            if skip:
-                page = {**page, "actions": [a for a in page["actions"] if a.get("node") not in skip]}
+            # An action without a node (BACK) is hidden by its id.
+            here = [r for r in refused if r["fingerprint"] == page["fingerprint"]]
+            skip = {r["node"] for r in here if r["node"] is not None}
+            skip_ids = {r.get("choice") for r in here if r["node"] is None}
+            if here:
+                page = {
+                    **page,
+                    "actions": [
+                        a for a in page["actions"] if a.get("node") not in skip and a["id"] not in skip_ids
+                    ],
+                }
             state["decision"] = choose(
                 page, state["goal"], state["history"], **({"refused": refused[-10:]} if refused else {})
             )
@@ -177,6 +200,11 @@ class Agent:
             action = next(a for a in page["actions"] if a["id"] == selected)
             if decision["operation"] == "HOVER":
                 action = {**action, "kind": "hover"}
+            if action["kind"] == "key":
+                # Lets a policy refuse a key by what has focus, e.g. Enter on a focused Delete button.
+                focus = page.get("focus") or {}
+                keys = ("role", "label", "href", "tag", "type")
+                action = {**action, "focused": {k: focus.get(k) for k in keys} if focus else None}
             if len(state["history"]) >= self.max_steps:
                 return self.stop("budget", "max_steps")
             text, helper = None, None
@@ -208,8 +236,9 @@ class Agent:
             try:
                 state["browser"].act(action, page, text=text)
             except Refused as refusal:
-                # The pointer moved but nothing was pressed: not history, but the model and stuck_after must see it.
+                # Nothing was pressed (or sent): not history, but the model and stuck_after must see it.
                 refused = state.setdefault("refused", [])
+                del refused[:-49]
                 refused.append(
                     {
                         "label": action["label"],
@@ -217,8 +246,9 @@ class Agent:
                         "reason": str(refusal),
                         "fingerprint": page["fingerprint"],
                         "node": action.get("node"),
+                        "choice": selected,
                         "after": len(state["history"]),
-                        "pointer_moved": True,
+                        "pointer_moved": refusal.pointer_moved,
                     }
                 )
                 if sum(r["after"] == len(state["history"]) for r in refused) >= self.stuck_after:
@@ -242,6 +272,7 @@ class Agent:
                     "operation": decision["operation"],
                     "target": decision["target"],
                     "page_changed": None,
+                    "content_changed": None,
                     "url": page["url"],
                     "usage": decision["usage"],
                     "executed_ms": round((time.perf_counter() - state["started_at"]) * 1000),
@@ -252,6 +283,8 @@ class Agent:
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             state["history"][-1].update(
                 page_changed=state["page"]["fingerprint"] != page["fingerprint"],
+                # Focus-free, for the stuck rule: pressing Tab over two inputs changes nothing on the page.
+                content_changed=content_fingerprint(state["page"]) != content_fingerprint(page),
                 url=state["page"]["url"],
                 elapsed_ms=state["elapsed_ms"],
             )
@@ -263,7 +296,7 @@ class Agent:
             state["status"] = (
                 "blocked"
                 if len(repeated) == self.stuck_after
-                and all(h["page_changed"] is False and h["kind"] != "wait" for h in repeated)
+                and all(h["content_changed"] is False and h["kind"] != "wait" for h in repeated)
                 else "ready"
             )
         else:

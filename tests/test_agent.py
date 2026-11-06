@@ -7,9 +7,19 @@ from unittest.mock import Mock
 
 import pytest
 
-from jev_ultrafast import ActionDenied, Agent, model
+from jev_ultrafast import ActionDenied, Agent, keys, model
 from jev_ultrafast import agent as loop
-from jev_ultrafast.browser import Refused, StalePage, browser_operation, fingerprint
+from jev_ultrafast.browser import (
+    NAVIGATION,
+    Browser,
+    Refused,
+    StalePage,
+    Unavailable,
+    browser_operation,
+    content_fingerprint,
+    control_actions,
+    fingerprint,
+)
 
 
 def page():
@@ -232,12 +242,14 @@ def test_observation_is_one_atomic_browser_read(monkeypatch):
     import jev_ultrafast.browser as browser
 
     p = page()
-    cdp = Mock(return_value={"result": {"value": p}})
+    expected = list(p["actions"])
+    cdp = Mock(side_effect=lambda method, **_: {"currentIndex": 0} if method == "Page.getNavigationHistory"
+               else {"result": {"value": p}})
     monkeypatch.setattr(browser, "cdp", cdp)
     actual = browser_operation({"operation": "observe", "session": "test", "screenshot": False})
-    assert actual["actions"] == p["actions"]
-    assert cdp.call_count == 1
-    assert cdp.call_args.args[0] == "Runtime.evaluate"
+    assert [a for a in actual["actions"] if a["kind"] not in {"key", "reload"}] == expected
+    # One atomic read of the page, plus the navigation history for BACK.
+    assert [c.args[0] for c in cdp.call_args_list] == ["Runtime.evaluate", "Page.getNavigationHistory"]
 
 
 def test_executor_rejects_a_stale_page_before_browser_input(monkeypatch):
@@ -502,6 +514,9 @@ def test_zero_settle_is_accepted(monkeypatch):
         "settle_ms": 0,
         "autocomplete_settle_ms": 0,
         "reveal_timeout_ms": 500,
+        "keys": (),
+        "urls": {},
+        "navigation_timeout_ms": 15000,
     }
 
 
@@ -722,3 +737,471 @@ def test_an_executed_action_resets_the_consecutive_refusal_count(runner, monkeyp
     assert len(runner.state["history"]) == 1
     runner.state["browser"].act.side_effect = Refused("again")
     assert runner.command("tick")["status"] == "ready"  # One refusal since the last executed action.
+
+
+# Keys, shortcuts and navigation.
+
+
+def with_controls(history_length=1, declared=(), urls=None, can_go_back=False):
+    p = page()
+    p["history_length"] = history_length
+    p["can_go_back"] = can_go_back
+    extra = control_actions(p, keys.offered_keys(declared), urls or {})
+    p["actions"] = [*p["actions"], *extra]
+    p["fingerprint"] = fingerprint(p)
+    return p
+
+
+def test_fixed_keys_are_offered_and_back_needs_history():
+    ids = {a["id"] for a in with_controls()["actions"]}
+    assert {f"key:{k}" for k in keys.FIXED_KEYS} <= ids
+    assert "reload" in ids and "back" not in ids
+    assert "back" in {a["id"] for a in with_controls(history_length=2, can_go_back=True)["actions"]}
+
+
+def test_back_is_not_offered_at_the_start_of_history_however_long_it_is():
+    # history.length counts forward entries: after one BACK it is still 2 although there is nothing behind.
+    assert "back" not in {a["id"] for a in with_controls(history_length=3, can_go_back=False)["actions"]}
+
+
+def test_goto_is_offered_only_for_declared_urls_and_declared_keys_extend_the_fixed_set():
+    plain = with_controls()["actions"]
+    assert not [a for a in plain if a["kind"] == "goto"] and "key:Control+K" not in {a["id"] for a in plain}
+    p = with_controls(declared=("Control+K",), urls={"Settings": "https://example.test/settings"})
+    goto = next(a for a in p["actions"] if a["kind"] == "goto")
+    assert goto["url"] == "https://example.test/settings" and goto["id"] == "goto:Settings"
+    assert "key:Control+K" in {a["id"] for a in p["actions"]}
+
+
+def test_action_space_gives_key_and_goto_their_own_heads_and_back_reload_are_targetless():
+    p = with_controls(
+        history_length=3, can_go_back=True, declared=("Control+K",), urls={"Settings": "https://example.test/s"}
+    )
+    elements, targets, controls = model.action_space(p["actions"])
+    assert {a["name"] for a in targets["PRESS_KEY"].values()} == {*keys.FIXED_KEYS, "Control+K"}
+    assert {a["name"] for a in targets["GOTO"].values()} == {"Settings"}
+    # Numbered like every other head: "1", "2", ... in offer order.
+    assert list(targets["PRESS_KEY"]) == [str(i) for i in range(1, len(keys.FIXED_KEYS) + 2)]
+    assert list(targets["GOTO"]) == ["1"]
+    assert {"BACK", "RELOAD"} <= set(controls) and "KEY:ENTER" not in controls
+    assert len(elements) == 2  # Keys and pages are not observed elements.
+
+
+def test_choose_builds_key_and_goto_heads_with_only_names(monkeypatch):
+    seen = {}
+
+    def post(_url, _key, body):
+        seen.update(body["questions"])
+        ops = body["questions"]["operation"]["criteria"]
+        return {
+            "model": "t",
+            "answers": {
+                "operation": {"choice": "PRESS_KEY", "confidence": 1.0, **probs(ops, "PRESS_KEY")},
+                "press_key_target": {
+                    "choice": "15",
+                    **probs(body["questions"]["press_key_target"]["criteria"], "15"),
+                    "confidence": 1.0,
+                },
+            },
+        }
+
+    def probs(ids, chosen):
+        return {"probabilities": {i: float(i == chosen) for i in ids}}
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setattr(model, "post_json", post)
+    p = with_controls(
+        history_length=2, can_go_back=True, declared=("Control+K",), urls={"Settings": "https://example.test/s"}
+    )
+    d = model.choose(p, "goal", [])
+    assert d["choice"] == "key:Control+K" and d["operation"] == "PRESS_KEY" and d["target"] == "15"
+    assert {"BACK", "RELOAD", "PRESS_KEY", "GOTO"} <= set(seen["operation"]["criteria"])
+    # Numeric criteria keys like every other head, the name inside the criterion. The model never sees a URL.
+    assert seen["goto_target"]["criteria"] == {"1": {"page": "Settings"}}
+    assert seen["press_key_target"]["criteria"]["1"] == {"key": "Enter"}
+    assert seen["press_key_target"]["criteria"]["4"] == {"key": "Shift+Tab"}
+    assert seen["press_key_target"]["criteria"]["15"] == {"key": "Control+K"}
+    assert all(k.isdigit() for k in seen["press_key_target"]["criteria"])
+
+
+@pytest.mark.parametrize(
+    "chord", ["Control+K", "Meta+K", "Alt+ArrowLeft", "Control+Shift+P", "Control+F5", "Control+1"]
+)
+def test_valid_chords(chord):
+    assert keys.validate_keys((chord,)) == (chord,)
+
+
+@pytest.mark.parametrize(
+    "chord",
+    ["K", "Enter", "Shift+K", "Ctrl+K", "Control+", "Control+Control+K", "Control+F13", "Control+Foo", "control+k",
+     "Control+KK", "Control+é", "", "Control+K+L", 5, None],
+)
+def test_invalid_chords_are_rejected(chord):
+    with pytest.raises(ValueError):
+        keys.validate_keys((chord,))
+
+
+def test_keys_must_be_a_sequence():
+    with pytest.raises(ValueError):
+        keys.validate_keys("Control+K")
+
+
+@pytest.mark.parametrize("url", ["/settings", "ftp://example.test/", "javascript:alert(1)", "https://",
+                                 "https://u:p@example.test/", "http://example.test:99999/", "https://exa mple.test/",
+                                 "data:text/html,x", 5])
+def test_invalid_urls_are_rejected(url):
+    with pytest.raises(ValueError):
+        keys.validate_urls({"Settings": url})
+
+
+@pytest.mark.parametrize("urls", ["https://example.test", {"": "https://example.test"}, {1: "https://example.test"}])
+def test_invalid_url_maps_are_rejected(urls):
+    with pytest.raises(ValueError):
+        keys.validate_urls(urls)
+
+
+def test_valid_urls_pass():
+    urls = {"Settings": "https://example.test/settings?x=1", "Local": "http://127.0.0.1:8000/a"}
+    assert keys.validate_urls(urls) == urls and keys.validate_urls(None) == {}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"keys": ("K",)}, {"keys": "Control+K"}, {"urls": {"A": "/x"}}, {"navigation_timeout_ms": 0},
+     {"navigation_timeout_ms": "5"},],
+)
+def test_navigation_arguments_are_validated_before_a_browser_opens(kwargs, monkeypatch):
+    opened = Mock()
+    monkeypatch.setattr(loop, "Browser", opened)
+    with pytest.raises(ValueError):
+        Agent("https://example.test/", "goal", **kwargs)
+    opened.assert_not_called()
+
+
+def test_declared_keys_and_urls_are_passed_to_the_browser(monkeypatch):
+    opened = Mock()
+    opened.return_value.observe.return_value = page()
+    monkeypatch.setattr(loop, "Browser", opened)
+    Agent("https://example.test/", "goal", keys=("Control+K",), urls={"S": "https://example.test/s"},
+          navigation_timeout_ms=5)
+    kwargs = opened.call_args.kwargs
+    assert kwargs["keys"] == ("Control+K",) and kwargs["urls"] == {"S": "https://example.test/s"}
+    assert kwargs["navigation_timeout_ms"] == 5
+
+
+def event(chord, n=0):
+    return keys.key_events(chord)[n]
+
+
+def test_enter_events():
+    down, up = keys.key_events("Enter")
+    assert down == {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13,
+                    "modifiers": 0, "text": "\r"}
+    assert up == {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "modifiers": 0}
+
+
+def test_shift_tab_events():
+    down, up = keys.key_events("Shift+Tab")
+    assert (down["key"], down["code"], down["windowsVirtualKeyCode"], down["modifiers"]) == ("Tab", "Tab", 9, 8)
+    assert "text" not in down and "text" not in up and up["type"] == "keyUp"
+
+
+def test_control_k_events_do_not_type():
+    down, up = keys.key_events("Control+K")
+    assert (down["key"], down["code"], down["windowsVirtualKeyCode"], down["modifiers"]) == ("k", "KeyK", 75, 2)
+    assert "text" not in down and up["modifiers"] == 2
+
+
+def test_space_events():
+    down, _ = keys.key_events("Space")
+    assert (down["key"], down["code"], down["windowsVirtualKeyCode"], down["text"]) == (" ", "Space", 32, " ")
+
+
+def test_other_key_events():
+    assert event("Meta+K")["modifiers"] == 4 and event("Alt+ArrowLeft")["modifiers"] == 1
+    assert event("Control+F5")["windowsVirtualKeyCode"] == 116 and event("Control+1")["code"] == "Digit1"
+    assert event("Escape")["windowsVirtualKeyCode"] == 27 and "text" not in event("Escape")
+
+
+def focused_page():
+    p = with_controls(declared=("Control+K",), urls={"S": "https://example.test/s"}, history_length=2, can_go_back=True)
+    p["focus"] = {"node": 10, "role": "textbox", "label": "Search", "href": None, "tag": "input", "type": "text",
+                  "guard": [10, "x"]}
+    return p
+
+
+def press(runner, action_id, operation="PRESS_KEY"):
+    runner.state["page"] = focused_page()
+    runner.state["page"]["fingerprint"] = fingerprint(runner.state["page"])
+    runner.state["decision"] = {**decision(action_id), "operation": operation}
+    return runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+
+
+@pytest.mark.parametrize(
+    "action_id, kind",
+    [("key:Enter", "key"), ("key:Control+K", "key"), ("back", "back"), ("reload", "reload"), ("goto:S", "goto")],
+)
+def test_agent_records_each_kind_before_observing_and_calls_the_hook(runner, action_id, kind):
+    hook = Mock()
+    runner.before_action = hook
+    runner.state["browser"].observe.side_effect = StalePage("navigating")
+    with pytest.raises(StalePage):
+        press(runner, action_id, "PRESS_KEY" if kind == "key" else kind.upper())
+    assert runner.state["history"][-1]["kind"] == kind  # Logged although the observation failed.
+    hook_action = hook.call_args.args[0]
+    assert hook_action["kind"] == kind
+    executed = runner.state["browser"].act.call_args.args[0]
+    assert executed["id"] == action_id
+    if kind == "key":
+        assert hook_action["key"] == action_id[4:]
+        assert hook_action["focused"] == {"role": "textbox", "label": "Search", "href": None, "tag": "input",
+                                          "type": "text"}
+    if kind == "goto":
+        assert hook_action["url"] == "https://example.test/s"
+
+
+def test_key_with_nothing_focused_reports_no_focus(runner):
+    runner.before_action = hook = Mock()
+    runner.state["page"] = with_controls()
+    runner.state["decision"] = {**decision("key:Escape"), "operation": "PRESS_KEY"}
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert hook.call_args.args[0]["focused"] is None
+
+
+def test_key_and_navigation_veto_executes_nothing_and_leaves_no_history(runner):
+    runner.before_action = Mock(side_effect=ActionDenied("no enter on delete"))
+    snapshot = press(runner, "key:Enter")
+    assert snapshot["status"] == "denied" and snapshot["denied"]["kind"] == "key"
+    runner.state["browser"].act.assert_not_called()
+    assert runner.state["history"] == []
+
+
+def test_key_and_navigation_count_toward_max_steps(runner):
+    runner.max_steps = 1
+    press(runner, "key:Tab")
+    assert len(runner.state["history"]) == 1
+    snapshot = press(runner, "reload", "RELOAD")
+    assert snapshot["status"] == "budget" and snapshot["stop_reason"] == "max_steps"
+    assert len(runner.state["history"]) == 1
+
+
+def test_unchanged_key_presses_end_the_run_as_blocked(runner):
+    runner.state["browser"].observe.side_effect = lambda **_: runner.state["page"]
+    for _ in range(3):
+        snapshot = press(runner, "key:Tab")
+    assert snapshot["status"] == "blocked"
+
+
+def test_refused_list_is_capped_at_the_last_fifty(runner):
+    runner.state["refused"] = [{"label": "old", "kind": "click", "reason": "r", "fingerprint": "f", "node": 99,
+                                "after": -1, "pointer_moved": True}] * 60
+    runner.state["browser"].act.side_effect = Refused("covered")
+    runner.state["decision"] = decision("e3")
+    with pytest.raises(Refused):
+        runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    refused = runner.state["refused"]
+    assert len(refused) == 50 and refused[-1]["label"] == "Go" and refused[0]["label"] == "old"
+
+
+def bare_browser():
+    b = Browser.__new__(Browser)
+    b.session, b.keys, b.urls, b.navigation_timeout_ms = "s", (), {}, 10
+    b.call = Mock(return_value={})
+    return b
+
+
+def test_key_action_sends_the_cdp_events_and_not_a_browser_operation(monkeypatch):
+    import jev_ultrafast.browser as browser
+
+    b = bare_browser()
+    b.fresh = Mock(return_value=True)
+    operation = Mock()
+    monkeypatch.setattr(browser, "browser_operation", operation)
+    b.act({"id": "key:Shift+Tab", "kind": "key", "key": "Shift+Tab"}, page())
+    assert [c.args[0] for c in b.call.call_args_list] == ["Input.dispatchKeyEvent"] * 2
+    assert b.call.call_args_list[0].kwargs["modifiers"] == 8
+    operation.assert_not_called()
+
+
+def test_stale_key_press_sends_nothing():
+    b = bare_browser()
+    b.evaluate = Mock(return_value=[1, ["other"]])
+    p = {**page(), "page_key": 1, "focus": {"node": 4, "guard": ["mine"]}}
+    with pytest.raises(StalePage):
+        b.act({"id": "key:Enter", "kind": "key", "key": "Enter"}, p)
+    b.call.assert_not_called()
+
+
+def test_key_freshness_compares_page_and_focus_guard():
+    b = bare_browser()
+    b.evaluate = Mock(return_value=[1, 4, ["g"]])
+    assert b.fresh({"page_key": 1, "focus": {"node": 4, "guard": ["g"]}}, {"kind": "key"}) is True
+    assert b.fresh({"page_key": 1, "focus": None}, {"kind": "key"}) is False
+    b.evaluate = Mock(return_value=[1, None, None])
+    assert b.fresh({"page_key": 1}, {"kind": "key"}) is True
+
+
+def test_key_freshness_tells_no_focus_from_a_focused_element_with_a_null_guard():
+    b = bare_browser()
+    # Focus sits on an aria-hidden element (null guard); the observation saw no focus at all.
+    b.evaluate = Mock(return_value=[1, 4, None])
+    assert b.fresh({"page_key": 1, "focus": None}, {"kind": "key"}) is False
+    # Focus moved from one null-guard element to another.
+    assert b.fresh({"page_key": 1, "focus": {"node": 5, "guard": None}}, {"kind": "key"}) is False
+    assert b.fresh({"page_key": 1, "focus": {"node": 4, "guard": None}}, {"kind": "key"}) is True
+
+
+@pytest.mark.parametrize("kind, method", [("reload", "Page.reload"), ("goto", "Page.navigate")])
+def test_navigation_waits_for_a_new_document_then_returns(kind, method):
+    b = bare_browser()
+    b.evaluate = Mock(side_effect=[[1, "a"], [1, "a", "complete"], [2, "b", "loading"], [2, "b", "complete"]])
+    b.navigation_timeout_ms = 2000
+    b.navigate({"kind": kind, "url": "https://example.test/b"})
+    assert b.call.call_args_list[0].args[0] == method
+    assert b.evaluate.call_count == 4
+
+
+def test_back_uses_the_previous_history_entry_and_refuses_at_the_start():
+    b = bare_browser()
+    b.evaluate = Mock(side_effect=[[1, "b"], [2, "a", "complete"]])
+    b.navigation_timeout_ms = 2000
+    b.call = Mock(side_effect=lambda m, **k: {"currentIndex": 1, "entries": [{"id": 7}, {"id": 8}]}
+                  if m == "Page.getNavigationHistory" else {})
+    b.navigate({"kind": "back"})
+    assert b.call.call_args_list[1].kwargs == {"entryId": 7}
+    b.evaluate = Mock(return_value=[1, "a"])
+    b.call = Mock(return_value={"currentIndex": 0, "entries": [{"id": 7}]})
+    with pytest.raises(Unavailable):
+        b.navigate({"kind": "back"})
+    assert [c.args[0] for c in b.call.call_args_list] == ["Page.getNavigationHistory"]  # Nothing was sent.
+
+
+def test_a_slow_navigation_returns_instead_of_raising():
+    b = bare_browser()
+    b.evaluate = Mock(return_value=[1, "a", "loading"])
+    b.navigation_timeout_ms = 30
+    b.navigate({"kind": "reload"})
+
+
+def test_navigation_kinds():
+    assert NAVIGATION == {"back", "reload", "goto"}
+
+
+# Fix round 1.
+
+
+def test_a_back_with_no_previous_page_is_a_recorded_refusal_that_hides_and_counts(runner):
+    runner.state["browser"].act.side_effect = Unavailable("There is no previous page. Not sent.")
+    p = with_controls(history_length=3, can_go_back=True)
+    runner.state["page"] = p
+    runner.state["decision"] = {**decision("back"), "operation": "BACK"}
+    with pytest.raises(Unavailable):
+        runner.command("act", {"fingerprint": p["fingerprint"]})
+    record = runner.state["refused"][-1]
+    assert record["kind"] == "back" and record["pointer_moved"] is False and record["choice"] == "back"
+    assert runner.state["history"] == []
+    # Hidden from the next choice while the page is unchanged; every other node-less action stays offered.
+    seen = {}
+    runner.state["browser"].fresh.return_value = True
+    original = loop.choose
+    def spy(page, goal, history, **kw):
+        seen["ids"] = {a["id"] for a in page["actions"]}
+        return decision("e3")
+
+    loop.choose = spy
+    try:
+        runner.command("predict")
+    finally:
+        loop.choose = original
+    assert "back" not in seen["ids"] and {"reload", "wait", "key:Enter"} <= seen["ids"]
+
+
+def test_stale_back_offers_end_the_run_as_blocked_after_stuck_after_refusals(runner):
+    runner.state["browser"].act.side_effect = Unavailable("There is no previous page. Not sent.")
+    p = with_controls(history_length=3, can_go_back=True)
+    runner.state["page"] = p
+    for _ in range(3):
+        runner.state["decision"] = {**decision("back"), "operation": "BACK"}
+        try:
+            snapshot = runner.command("act", {"fingerprint": p["fingerprint"]})
+        except Unavailable:
+            continue
+    assert snapshot["status"] == "blocked" and snapshot["stop_reason"] == "refused"
+
+
+def tab_pages():
+    """The same two inputs, focus on each in turn: only focus and the focused flag differ."""
+    pages = []
+    for focused in ("a", "b"):
+        p = page()
+        p["actions"] = [
+            {"id": "e1", "kind": "fill", "label": "First", "role": "textbox", "value": "", "node": 1,
+             **({"focused": True} if focused == "a" else {})},
+            {"id": "e2", "kind": "fill", "label": "Second", "role": "textbox", "value": "", "node": 2,
+             **({"focused": True} if focused == "b" else {})},
+            *with_controls()["actions"][4:],
+        ]
+        p["focus"] = {"node": 1 if focused == "a" else 2, "role": "textbox", "label": "x", "href": None,
+                      "guard": [1]}
+        p["fingerprint"] = fingerprint(p)
+        pages.append(p)
+    return pages
+
+
+def test_focus_is_in_the_observation_identity_but_not_in_the_content_fingerprint():
+    first, second = tab_pages()
+    assert first["fingerprint"] != second["fingerprint"]
+    assert content_fingerprint(first) == content_fingerprint(second)
+    changed = {**second, "text": "different"}
+    assert content_fingerprint(changed) != content_fingerprint(second)
+
+
+def test_a_model_tabbing_over_two_inputs_ends_blocked(runner):
+    first, second = tab_pages()
+    runner.stuck_after = 3
+    runner.state["page"] = first
+    seen = []
+    for i in range(3):
+        current = (first, second)[i % 2]
+        nxt = (first, second)[(i + 1) % 2]
+        runner.state["page"] = current
+        runner.state["browser"].observe.return_value = nxt
+        runner.state["decision"] = {**decision("key:Tab"), "operation": "PRESS_KEY"}
+        snapshot = runner.command("act", {"fingerprint": current["fingerprint"]})
+        seen.append(snapshot["history"][-1])
+    assert all(h["page_changed"] is True and h["content_changed"] is False for h in seen)
+    assert snapshot["status"] == "blocked"
+
+
+def test_validate_keys_offers_case_variants_of_one_chord_once():
+    assert keys.validate_keys(("Control+k", "Control+K", "Alt+ArrowLeft")) == ("Control+K", "Alt+ArrowLeft")
+    assert keys.offered_keys(keys.validate_keys(("Control+k",))).count("Control+K") == 1
+
+
+class Clock:
+    """A fake monotonic clock that sleep() advances, so window tests take no time."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def test_back_is_offered_from_the_navigation_entry_in_the_observation(monkeypatch):
+    import jev_ultrafast.browser as browser
+
+    for index, offered in ((0, False), (1, True)):
+        info = {**page(), "history_length": 3}
+        def respond(method, _i=index, **_):
+            if method == "Page.getNavigationHistory":
+                return {"currentIndex": _i}
+            return {"result": {"value": dict(info, actions=list(info["actions"]))}}
+
+        cdp = Mock(side_effect=respond)
+        monkeypatch.setattr(browser, "cdp", cdp)
+        actual = browser_operation({"operation": "observe", "session": "s", "screenshot": False})
+        assert ("back" in {a["id"] for a in actual["actions"]}) is offered

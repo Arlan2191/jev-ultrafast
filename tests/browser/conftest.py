@@ -7,7 +7,9 @@ unless JEV_REQUIRE_BROWSER=1 is set (as in CI), which turns the skip into a fail
 import functools
 import http.server
 import os
+import re
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -25,8 +27,19 @@ def pytest_collection_modifyitems(items):
 
 @pytest.fixture(scope="session")
 def fixture_base_url():
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(FIXTURES))
-    handler.log_message = lambda *args, **kwargs: None
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *args, **kwargs):
+            pass
+
+        def do_GET(self):
+            # /delay/<ms>/<path> answers <path> after <ms>: a form or link whose server is slow.
+            match = re.match(r"/delay/(\d+)(/.*)", self.path)
+            if match:
+                time.sleep(int(match[1]) / 1000)
+                self.path = match[2]
+            super().do_GET()
+
+    handler = functools.partial(Handler, directory=str(FIXTURES))
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

@@ -1,0 +1,5 @@
+<!doctype html><title>Enter submits</title>
+<form onsubmit="event.preventDefault(); window.submitted = this.query.value">
+  <input name="query" aria-label="Query" value="a book">
+</form>
+<script>window.submitted = null; document.querySelector('input').focus();</script>

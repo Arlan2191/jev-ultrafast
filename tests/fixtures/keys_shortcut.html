@@ -1,0 +1,9 @@
+<!doctype html><title>Shortcut</title>
+<div id="palette" role="dialog" aria-label="Palette" hidden><input aria-label="Command"></div>
+<button type="button">Anything</button>
+<script>
+  window.opened = 0;
+  document.addEventListener('keydown', e => {
+    if (e.ctrlKey && e.key.toLowerCase() === 'k') { e.preventDefault(); window.opened++; document.getElementById('palette').hidden = false; }
+  });
+</script>

@@ -1,0 +1,14 @@
+<!doctype html><title>Overlays</title>
+<style>
+  .host { padding: 8px; border: 1px solid #ccc; margin: 4px; }
+  .hid { opacity: 0; }
+  dialog { position: static; margin: 0; border: 0; padding: 0; }
+  [popover] { display: block; position: static; margin: 0; border: 0; padding: 0; inset: auto; }
+</style>
+<div class="host"><dialog open class="hid"><button type="button">Native dialog button</button></dialog></div>
+<div class="host"><div class="hid" aria-modal="true"><button type="button">Modal button</button></div></div>
+<div class="host"><div class="hid" popover><button type="button">Popover button</button></div></div>
+<div class="host"><div class="hid" role="alertdialog"><button type="button">Alert button</button></div></div>
+<div class="host"><div class="hid" role="dialog"><button type="button">Role dialog button</button></div></div>
+<div class="host"><div class="hid" style="position:fixed;left:300px;top:20px"><button type="button">Fixed button</button></div></div>
+<div class="host"><div class="hid"><button type="button">Plain hover button</button></div></div>
