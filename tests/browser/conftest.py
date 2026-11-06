@@ -47,11 +47,12 @@ def fixture_base_url():
         def do_GET(self):
             # /stream: six chunks, half a second apart. /events: a server-sent event every 200 ms, until the client
             # leaves. /api/<ms>: a short answer after <ms>. /hang: a long poll that stays open for 20 s.
-            if self.path.startswith("/stream"):
+            route = self.path.split("?")[0]
+            if route == "/stream":
                 return self.stream([f"chunk {i} " for i in range(1, 7)], 0.5)
-            if self.path.startswith("/events"):
+            if route == "/events":
                 return self.stream((f"data: tick {i}\n\n" for i in range(100)), 0.2, "text/event-stream")
-            if self.path.startswith("/hang"):
+            if route == "/hang":
                 return self.stream([" "], 20)
             api = re.match(r"/api/(\d+)", self.path)
             if api:
