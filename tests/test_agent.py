@@ -9,7 +9,7 @@ import pytest
 
 from jev_ultrafast import ActionDenied, Agent, model
 from jev_ultrafast import agent as loop
-from jev_ultrafast.browser import StalePage, browser_operation, fingerprint
+from jev_ultrafast.browser import Refused, StalePage, browser_operation, fingerprint
 
 
 def page():
@@ -431,6 +431,7 @@ def test_stuck_after_is_honoured(runner):
         {"stuck_after": 0},
         {"settle_ms": -1},
         {"autocomplete_settle_ms": -1},
+        {"reveal_timeout_ms": -1},
         {"before_action": "nope"},
     ],
 )
@@ -497,4 +498,227 @@ def test_zero_settle_is_accepted(monkeypatch):
     opened = Mock(return_value=browser)
     monkeypatch.setattr(loop, "Browser", opened)
     Agent("https://example.test/", "goal", settle_ms=0, autocomplete_settle_ms=0)
-    assert opened.call_args.kwargs == {"settle_ms": 0, "autocomplete_settle_ms": 0}
+    assert opened.call_args.kwargs == {
+        "settle_ms": 0,
+        "autocomplete_settle_ms": 0,
+        "reveal_timeout_ms": 500,
+    }
+
+
+def revealed_page():
+    p = page()
+    p["actions"].insert(
+        2,
+        {
+            "id": "e3r", "kind": "click", "label": "Copy", "role": "button", "value": "", "node": 40,
+            "revealed_by": "hover",
+        },
+    )
+    p["fingerprint"] = fingerprint(p)
+    return p
+
+
+def test_action_space_carries_revealed_by_and_offers_hover_per_clickable_element():
+    elements, targets, _controls = model.action_space(revealed_page()["actions"])
+    copy_ = next(e for e in elements if e["label"] == "Copy")
+    assert copy_["revealed_by"] == "hover"
+    assert copy_["operations"] == ["CLICK", "HOVER"]
+    assert set(targets["HOVER"]) == {copy_["index"]}  # Only the element with a hover signal gets the head.
+    assert targets["HOVER"][copy_["index"]]["id"] == "e3r"
+    assert next(e for e in elements if e["label"] == "Go")["operations"] == ["CLICK"]
+    assert "revealed_by" not in next(e for e in elements if e["label"] == "Go")
+
+
+def test_choose_offers_hover_with_its_own_target_head(monkeypatch):
+    seen = {}
+
+    def post(_url, _key, body):
+        seen.update(body["questions"])
+        return {
+            "model": "test",
+            "answers": {
+                "operation": choice(body["questions"]["operation"]["criteria"], "HOVER"),
+                "hover_target": choice(body["questions"]["hover_target"]["criteria"], "2"),
+            },
+        }
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test")
+    monkeypatch.setattr(model, "post_json", post)
+    d = model.choose(revealed_page(), "Copy the answer", [])
+    assert "HOVER" in seen["operation"]["criteria"] and "hover_target" in seen
+    assert seen["hover_target"]["criteria"]["2"]["revealed_by"] == "hover"
+    assert d["operation"] == "HOVER" and d["choice"] == "e3r"
+
+
+def test_hover_executes_through_browser_act_hook_history_and_stuck_counter(runner):
+    runner.stuck_after = 2
+    runner.state["page"] = runner.state["browser"].observe.return_value
+    hook = Mock()
+    runner.before_action = hook
+    hover = {**decision("e3"), "operation": "HOVER", "target": "2"}
+    runner.state["decision"] = hover
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    executed = runner.state["browser"].act.call_args.args[0]
+    assert executed["kind"] == "hover" and executed["id"] == "e3"
+    assert hook.call_args.args[0]["kind"] == "hover"
+    assert runner.state["history"][0]["kind"] == "hover" and runner.state["status"] == "ready"
+    runner.state["decision"] = hover
+    assert runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})["status"] == "blocked"
+
+
+def test_hover_veto_executes_nothing(runner):
+    runner.before_action = Mock(side_effect=ActionDenied("no hover"))
+    runner.state["decision"] = {**decision("e3"), "operation": "HOVER"}
+    snapshot = runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert snapshot["status"] == "denied" and snapshot["denied"]["kind"] == "hover"
+    runner.state["browser"].act.assert_not_called()
+
+
+def test_reveal_timeout_is_validated_and_passed_to_the_browser(monkeypatch):
+    opened = Mock()
+    monkeypatch.setattr(loop, "Browser", opened)
+    for bad in (-1, True, "5", 1.5):
+        with pytest.raises(ValueError):
+            Agent("https://example.test/", "goal", reveal_timeout_ms=bad)
+    opened.assert_not_called()
+    opened.return_value.observe.return_value = page()
+    Agent("https://example.test/", "goal", reveal_timeout_ms=0)
+    assert opened.call_args.kwargs["reveal_timeout_ms"] == 0
+
+
+def test_hover_is_a_fresh_checked_kind_and_requests_carry_the_reveal_timeout(monkeypatch):
+    import jev_ultrafast.browser as browser
+
+    b = browser.Browser.__new__(browser.Browser)
+    b.session, b.reveal_timeout_ms = "s", 123
+    seen = []
+    b.evaluate = lambda expression: seen.append(expression) or [None, None]
+    # A hover is checked against the per-node guard, not the page marker.
+    assert b.fresh({**page(), "page_key": 1, "guards": {}}, {"kind": "hover", "node": 20}) is False
+    assert "guard(" in seen[0]
+    b.fresh = Mock(return_value=True)
+    operation = Mock(return_value={})
+    monkeypatch.setattr(browser, "browser_operation", operation)
+    b.act({"id": "e1", "kind": "hover", "node": 1}, page())
+    assert operation.call_args.args[0]["reveal_timeout_ms"] == 123
+
+
+def test_every_press_is_preceded_by_a_pointer_move(monkeypatch):
+    import jev_ultrafast.browser as browser
+
+    calls = []
+
+    def cdp(method, **params):
+        calls.append((method, params.get("type")))
+        if method == "Runtime.evaluate":
+            return {"result": {"value": {"x": 5, "y": 6}}}
+        return {}
+
+    monkeypatch.setattr(browser, "cdp", cdp)
+    browser_operation({"operation": "act", "session": "s", "action": {"id": "e1", "kind": "click", "node": 1}})
+    mouse = [t for m, t in calls if m == "Input.dispatchMouseEvent"]
+    assert mouse == ["mouseMoved", "mousePressed", "mouseReleased"]
+
+
+def test_hover_moves_the_pointer_and_never_presses(monkeypatch):
+    import jev_ultrafast.browser as browser
+
+    calls = []
+
+    def cdp(method, **params):
+        calls.append((method, params.get("type")))
+        if method == "Runtime.evaluate":
+            return {"result": {"value": {"x": 5, "y": 6}}}
+        return {}
+
+    monkeypatch.setattr(browser, "cdp", cdp)
+    browser_operation({"operation": "act", "session": "s", "action": {"id": "e1", "kind": "hover", "node": 1}})
+    assert [t for m, t in calls if m == "Input.dispatchMouseEvent"] == ["mouseMoved"]
+
+
+def test_a_reveal_candidate_that_stays_hidden_is_never_pressed(monkeypatch):
+    import jev_ultrafast.browser as browser
+
+    calls = []
+
+    def cdp(method, **params):
+        calls.append((method, params.get("type")))
+        if method == "Runtime.evaluate":
+            # Geometry for the reveal step, then "never became visible".
+            return {"result": {"value": {"x": 5, "y": 6} if "awaitPromise" not in params else False}}
+        return {}
+
+    monkeypatch.setattr(browser, "cdp", cdp)
+    action = {"id": "e1", "kind": "click", "node": 1, "revealed_by": "hover"}
+    with pytest.raises(StalePage, match="hidden"):
+        browser_operation({"operation": "act", "session": "s", "action": action, "reveal_timeout_ms": 10})
+    types = [t for m, t in calls if m == "Input.dispatchMouseEvent"]
+    assert types == ["mouseMoved"]
+
+
+@pytest.mark.parametrize(
+    "signal", [{"revealed_by": "hover"}, {"hover_signal": True}, {"expanded": "false"}]
+)
+def test_hover_is_offered_only_for_elements_with_a_hover_signal(signal):
+    p = page()
+    elements, targets, _ = model.action_space(p["actions"])
+    assert "HOVER" not in targets and all("HOVER" not in e["operations"] for e in elements)
+    p["actions"][2].update(signal)
+    elements, targets, _ = model.action_space(p["actions"])
+    assert list(targets["HOVER"].values()) == [p["actions"][2]]
+    assert next(e for e in elements if e["label"] == "Go")["operations"] == ["CLICK", "HOVER"]
+
+
+def test_refused_presses_reach_recent_actions_in_order_and_history_stays_executed_only():
+    history = [{"action": "Open", "kind": "click", "text": None, "page_changed": True}]
+    refused = [{"label": "Remove", "kind": "click", "after": 1}]
+    assert model.recent_actions(history, refused) == [
+        {"action": "Open", "kind": "click", "text": None, "page_changed": True},
+        {"action": "Remove", "kind": "click", "text": None, "page_changed": False, "refused": True},
+    ]
+
+
+def honeypot_run(runner, monkeypatch):
+    seen = []
+
+    def choose(p, goal, history, refused=()):
+        seen.append((p, list(refused)))
+        return {**decision("e3"), "operation": "CLICK", "target": "2"}
+
+    monkeypatch.setattr(loop, "choose", choose)
+    runner.state["browser"].act.side_effect = Refused("Control stayed hidden after hovering. Not pressed.")
+    return seen
+
+
+def test_a_refused_press_is_recorded_not_executed_and_hidden_from_the_next_choice(runner, monkeypatch):
+    seen = honeypot_run(runner, monkeypatch)
+    runner.command("tick")
+    state = runner.state
+    assert state["history"] == [] and state["status"] == "ready"
+    (record,) = state["refused"]
+    assert record["label"] == "Go" and record["kind"] == "click" and record["pointer_moved"] is True
+    assert record["fingerprint"] == state["page"]["fingerprint"] and record["reason"]
+    runner.command("tick")
+    page_seen, refused_seen = seen[1]
+    assert all(a.get("node") != 20 for a in page_seen["actions"]) and refused_seen == state["refused"][:1]
+
+
+def test_a_model_that_always_picks_the_honeypot_ends_blocked_long_before_the_call_budget(runner, monkeypatch):
+    seen = honeypot_run(runner, monkeypatch)
+    snapshot = runner.command("tick")
+    while snapshot["status"] not in loop.TERMINAL:
+        snapshot = runner.command("tick")
+    assert snapshot["status"] == "blocked" and snapshot["stop_reason"] == "refused"
+    assert len(seen) == runner.stuck_after < runner.max_model_calls
+    assert runner.state["history"] == []
+
+
+def test_an_executed_action_resets_the_consecutive_refusal_count(runner, monkeypatch):
+    honeypot_run(runner, monkeypatch)
+    runner.stuck_after = 2
+    runner.command("tick")
+    runner.state["browser"].act.side_effect = None
+    runner.command("tick")
+    assert len(runner.state["history"]) == 1
+    runner.state["browser"].act.side_effect = Refused("again")
+    assert runner.command("tick")["status"] == "ready"  # One refusal since the last executed action.

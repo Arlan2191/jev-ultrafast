@@ -58,7 +58,9 @@ def action_space(actions):
         if node not in indices:
             index = str(len(elements) + 1)
             indices[node] = index
-            element = {k: action[k] for k in ("role", "value", "checked", "selected", "expanded") if k in action}
+            element = {
+                k: action[k] for k in ("role", "value", "checked", "selected", "expanded", "revealed_by") if k in action
+            }
             element.update(index=index, label=action["label"].split(" → ")[0], operations=[])
             if kind == "select":
                 element["value"] = action.get("current_value", "")
@@ -75,15 +77,36 @@ def action_space(actions):
             target = f"{index}:{len(element['options']) + 1}"
             element["options"].append({"index": target, "label": action["label"], "value": action["value"]})
         group[target] = action
+        if kind == "click" and (
+            action.get("revealed_by") or action.get("hover_signal") or "expanded" in action
+        ):
+            # Hover shares CLICK's candidates but is offered only where the page hints at a hover effect:
+            # revealed_by, aria-haspopup, aria-expanded, a title or aria-describedby. The agent runs it without a press.
+            element = elements[int(index) - 1]
+            if "HOVER" not in element["operations"]:
+                element["operations"].append("HOVER")
+            targets.setdefault("HOVER", {})[target] = action
     return elements, targets, controls
 
 
-def choose(state, goal, history):
+def recent_actions(history, refused=()):
+    """Executed actions plus refused presses, in order; a refused press never reached history."""
+    events = [(i, 0, h) for i, h in enumerate(history)]
+    events += [(r["after"] - 0.5, 1, {**r, "page_changed": False, "text": None, "action": r["label"]}) for r in refused]
+    events.sort(key=lambda e: (e[0], e[1]))
+    return [
+        {**{k: h.get(k) for k in ("action", "kind", "text", "page_changed")}, **({"refused": True} if r else {})}
+        for _, r, h in events[-10:]
+    ]
+
+
+def choose(state, goal, history, refused=()):
     elements, targets, controls = action_space(state["actions"])
     labels = {
         "CLICK": "Click an element, button, menu option, autocomplete suggestion, or calendar day.",
         "TYPE_TEXT": "Enter or replace text in an editable field. A small LLM will supply the value from the goal.",
         "SELECT": "Select an observed dropdown value.",
+        "HOVER": "Move the pointer over an element without pressing, to open a hover menu or tooltip.",
     }
     operations = {key: labels[key] for key in targets}
     operations.update({key: value["label"] for key, value in controls.items()})
@@ -98,7 +121,7 @@ def choose(state, goal, history):
                 index: {
                     "element": f"[{index}] {a['label']}",
                     "current_value": a.get("current_value", a.get("value", "")),
-                    **{k: a[k] for k in ("role", "checked", "selected", "expanded") if k in a},
+                    **{k: a[k] for k in ("role", "checked", "selected", "expanded", "revealed_by") if k in a},
                 }
                 for index, a in candidates.items()
             },
@@ -109,9 +132,7 @@ def choose(state, goal, history):
         "state": {
             "page": {k: state[k] for k in ("url", "title", "text")},
             "elements": elements,
-            "recent_actions": [
-                {k: h.get(k) for k in ("action", "kind", "text", "page_changed")} for h in history[-10:]
-            ],
+            "recent_actions": recent_actions(history, refused),
         },
         "questions": questions,
     }

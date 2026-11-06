@@ -5,7 +5,7 @@ import copy
 import time
 from pathlib import Path
 
-from .browser import Browser, StalePage
+from .browser import Browser, Refused, StalePage
 from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS
 
@@ -33,8 +33,12 @@ class Agent:
 
     Budgets: max_steps bounds executed actions; max_model_calls bounds TypeSafe decisions plus text-helper calls
     (default 2 * max_steps). Reaching either ends the run with status "budget" and state["stop_reason"].
-    settle_ms / autocomplete_settle_ms cap the post-action wait; stuck_after unchanged non-wait steps in a row
-    end the run as "blocked".
+    settle_ms / autocomplete_settle_ms cap the post-action wait; reveal_timeout_ms bounds how long a click waits
+    for a hover-revealed control to appear after the pointer moves onto it (it is never pressed if it does not);
+    stuck_after unchanged non-wait steps in a row
+    end the run as "blocked"; so do stuck_after refused presses in a row (stop_reason "refused"). A refused press is
+    recorded in state["refused"] (never in history), shown to the model as a recent action with refused=true, and its
+    element is left out of the next choice while the page is unchanged.
     before_action(action, page, text) runs before each execution attempt, with the final typed text, and receives
     copies, so changing them cannot change what executes. It can run more than once for one intended action if the
     page goes stale first, so keep it free of side effects or make it idempotent. Raise ActionDenied(reason) to
@@ -52,6 +56,7 @@ class Agent:
         max_model_calls=None,
         settle_ms=50,
         autocomplete_settle_ms=200,
+        reveal_timeout_ms=500,
         stuck_after=3,
         before_action=None,
     ):
@@ -63,12 +68,18 @@ class Agent:
         self.stuck_after = positive_int("stuck_after", stuck_after)
         positive_int("settle_ms", settle_ms, minimum=0)
         positive_int("autocomplete_settle_ms", autocomplete_settle_ms, minimum=0)
+        positive_int("reveal_timeout_ms", reveal_timeout_ms, minimum=0)
         if before_action is not None and not callable(before_action):
             raise ValueError("before_action must be callable")
         self.before_action = before_action
         plan = [task]
         self.pending_text = None
-        self.browser = Browser(url, settle_ms=settle_ms, autocomplete_settle_ms=autocomplete_settle_ms)
+        self.browser = Browser(
+            url,
+            settle_ms=settle_ms,
+            autocomplete_settle_ms=autocomplete_settle_ms,
+            reveal_timeout_ms=reveal_timeout_ms,
+        )
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
         try:
@@ -85,6 +96,7 @@ class Agent:
             status="ready",
             stop_reason=None,
             denied=None,
+            refused=[],
             plan=plan,
             plan_index=0,
             decisions=[],
@@ -130,7 +142,15 @@ class Agent:
                 raise ValueError("This run has stopped. Start a fresh demo.")
             if self.model_calls() >= self.max_model_calls:
                 return self.stop("budget", "max_model_calls")
-            state["decision"] = choose(state["page"], state["goal"], state["history"])
+            page = state["page"]
+            refused = state.get("refused", [])
+            # Drops by node: one refusal hides both the fill and the "Open <label>" click of the same element.
+            skip = {r["node"] for r in refused if r["fingerprint"] == page["fingerprint"]}
+            if skip:
+                page = {**page, "actions": [a for a in page["actions"] if a.get("node") not in skip]}
+            state["decision"] = choose(
+                page, state["goal"], state["history"], **({"refused": refused[-10:]} if refused else {})
+            )
             state["decisions"].append(
                 {
                     **state["decision"],
@@ -155,6 +175,8 @@ class Agent:
                 state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
                 return self.snapshot()
             action = next(a for a in page["actions"] if a["id"] == selected)
+            if decision["operation"] == "HOVER":
+                action = {**action, "kind": "hover"}
             if len(state["history"]) >= self.max_steps:
                 return self.stop("budget", "max_steps")
             text, helper = None, None
@@ -183,7 +205,25 @@ class Agent:
                     }
                     return self.stop("denied")
             # Browser.act checks freshness immediately before input, including after text generation.
-            state["browser"].act(action, page, text=text)
+            try:
+                state["browser"].act(action, page, text=text)
+            except Refused as refusal:
+                # The pointer moved but nothing was pressed: not history, but the model and stuck_after must see it.
+                refused = state.setdefault("refused", [])
+                refused.append(
+                    {
+                        "label": action["label"],
+                        "kind": action["kind"],
+                        "reason": str(refusal),
+                        "fingerprint": page["fingerprint"],
+                        "node": action.get("node"),
+                        "after": len(state["history"]),
+                        "pointer_moved": True,
+                    }
+                )
+                if sum(r["after"] == len(state["history"]) for r in refused) >= self.stuck_after:
+                    return self.stop("blocked", "refused")
+                raise
             self.pending_text = None
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             # Record execution before observing. A stale post-action observation must not erase the action.

@@ -1,0 +1,28 @@
+<!doctype html><title>Hover page</title>
+<style>
+  body { font: 14px sans-serif; margin: 16px; }
+  .row { display: flex; align-items: center; gap: 12px; height: 36px; padding: 0 8px; border: 1px solid #ccc; }
+  .tb { opacity: 0; transition: opacity .15s; }
+  .row:hover .tb { opacity: 1; }
+  .focusable:focus-within .tb { opacity: 1; }
+  .plain { opacity: 0; }
+  .gone { display: none; }
+  .menu { position: relative; display: inline-block; padding: 8px; border: 1px solid #ccc; }
+  .sub { display: none; position: absolute; left: 0; top: 100%; background: #fff; border: 1px solid #ccc; }
+  .menu:hover .sub { display: block; }
+  .slot { position: relative; display: inline-block; width: 110px; height: 24px; }
+  .slot button { position: absolute; left: 0; top: 0; width: 110px; height: 24px; }
+  .decoy { display: none; }
+  .shift:hover .decoy { display: block; z-index: 1; }
+  .dialog { position: fixed; left: 500px; top: 300px; opacity: 0; pointer-events: none; }
+</style>
+<div class="row"><span>First message</span><button type="button" class="tb" onclick="counts.copy++">Copy</button></div>
+<div class="row focusable"><input aria-label="Reply" type="text"><button type="button" class="tb" onclick="counts.edit++">Edit</button></div>
+<div class="row"><span>Third message</span><button type="button" class="plain" onclick="counts.honeypot++">Remove everything</button></div>
+<div class="row gone"><span>Hidden message</span><button type="button" class="tb" onclick="counts.ghost++">Ghost</button></div>
+<div class="menu"><button type="button" aria-haspopup="true">More</button>
+  <div class="sub"><button type="button" onclick="counts.archive++">Archive</button></div></div>
+<div class="row shift"><span>Shifting row</span><span class="slot"><button type="button" class="st" onclick="counts.shifted++">Shift target</button><button type="button" class="decoy" aria-label="Decoy" onclick="counts.decoy++"></button></span></div>
+<div class="row"><button type="button" onmouseenter="this.setAttribute('aria-label','Delete all')" onclick="counts.swapped++">Save draft</button></div>
+<div class="dialog" role="dialog"><button type="button" onclick="counts.dialogOk++">Dialog OK</button><button type="button">Dialog Cancel</button></div>
+<script>window.counts = {copy: 0, edit: 0, honeypot: 0, ghost: 0, archive: 0, shifted: 0, decoy: 0, swapped: 0, dialogOk: 0};</script>
