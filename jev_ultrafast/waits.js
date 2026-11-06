@@ -146,6 +146,7 @@
     },
   };
 
+  w.timeout = nativeSet;
   w.activity = () => ({epoch: w.epoch, started: w.started, inflight: w.inflight.size, timers: w.timers.size});
   w.document = () => [performance.timeOrigin, location.href];
   // One slice of a wait: resolves when the condition holds, or after slice_ms with the reason it does not.

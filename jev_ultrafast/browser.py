@@ -142,8 +142,11 @@ class Browser:
                       const field=window.__jevFast?.nodes.get(action.node);
                       const autocomplete=action.kind==='fill' && field?.getAttribute('role')==='combobox';
                       let frames=0, stopped=false, raf=0;
-                      const finish=()=>{stopped=true;cancelAnimationFrame(raf);resolve(window.__jevWait?.activity() ?? null)};
-                      setTimeout(finish,autocomplete ? autocompleteSettleMs : settleMs);
+                      const finish=()=>{
+                        stopped=true;cancelAnimationFrame(raf);resolve(window.__jevWait?.activity() ?? null);
+                      };
+                      // The tracker's own timer: this settle is not page activity.
+                      (window.__jevWait?.timeout ?? setTimeout)(finish,autocomplete ? autocompleteSettleMs : settleMs);
                       const ready=()=>{
                         if (stopped) return;
                         const ids=(field?.getAttribute('aria-controls')||field?.getAttribute('aria-owns')||'')
