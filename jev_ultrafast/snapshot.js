@@ -6,6 +6,12 @@
     const id=cache.ids.get(e); cache.nodes.set(id,e); return id;
   };
   for (const [id,e] of cache.nodes) if (!e.isConnected) cache.nodes.delete(id);
+  // Set when this document starts any navigation (link, form submit, script) so the executor knows to wait for the
+  // new document. Only a flag: it carries no data about the navigation.
+  if (window.navigation && !cache.watchingNavigation) {
+    cache.watchingNavigation=true;
+    window.navigation.addEventListener('navigate',()=>{cache.navigating=true});
+  }
   const safe = e => !['password','file','hidden'].includes(e.type);
   const visible = e => !e.closest('[aria-hidden="true"],[inert]') &&
     e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
@@ -83,12 +89,14 @@
     return [...guard,scope?.innerText?.slice(0,6000)||''];
   };
   // The element that has keyboard focus, if it is not the document itself. A key press is only valid while this
-  // identity and guard still match what was observed.
+  // identity and guard still match what was observed. A password, file or hidden input is never read: its guard
+  // is identity, type and accessible name only, so no value can enter the observation through focus.
   cache.focused=()=>{
     const e=document.activeElement;
     if (!e || e===document.body || e===document.documentElement) return null;
+    const guard=safe(e) ? cache.guard(e) : (shown(e) ? [identity(e),e.type,name(e)] : null);
     return {node:identity(e),role:role(e),label:name(e)||e.tagName.toLowerCase(),href:e.getAttribute('href'),
-      guard:cache.guard(e)};
+      tag:e.tagName.toLowerCase(),type:e.type??null,guard};
   };
   // Controls that only appear while the pointer is over their row come after every visible control,
   // so they can never push a visible one past the cap.

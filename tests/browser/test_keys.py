@@ -1,5 +1,9 @@
 """Key presses and navigation on real pages. The model is stubbed, so no paid call is made."""
 
+import json
+import statistics
+import time
+
 import pytest
 
 from jev_ultrafast import ActionDenied, Agent
@@ -153,3 +157,97 @@ def test_overlays_of_every_kind_list_none_of_their_buttons(start):
         "Role dialog button",
         "Fixed button",
     }
+
+
+SECRET = "hunter2-SECRET-9x"
+
+
+def whole_state(agent):
+    """Everything the run exposes: the page, the decision, history, refusals, plus the snapshot the UI downloads."""
+    state = {k: v for k, v in agent.state.items() if k != "browser"}
+    return json.dumps([state, agent.snapshot()], default=str)
+
+
+def test_a_focused_password_value_never_enters_the_observation_and_enter_still_dispatches(start, monkeypatch):
+    stub(monkeypatch, [key("Enter")])
+    agent = start("keys_password.html", max_steps=1)
+    focus = agent.state["page"]["focus"]
+    assert focus["type"] == "password" and focus["label"] == "Password" and focus["tag"] == "input"
+    assert agent.browser.evaluate("document.activeElement.value") == SECRET  # The field really holds it.
+    assert SECRET not in whole_state(agent)
+    list(agent.run())
+    assert agent.browser.evaluate("window.submitted") is True  # Enter on a focused password field dispatches.
+    assert agent.state["history"][0]["kind"] == "key"
+    assert SECRET not in whole_state(agent)
+
+
+def test_back_is_offered_only_while_there_is_a_previous_entry(start, monkeypatch):
+    agent = start("nav_one.html", max_steps=10)
+
+    def offered():
+        index = agent.browser.call("Page.getNavigationHistory")["currentIndex"]
+        assert ("back" in {a["id"] for a in agent.state["page"]["actions"]}) is (index > 0)
+        return index > 0
+
+    offered()  # A fresh tab may or may not start with an entry behind it; either way the offer follows the index.
+    link = next(a for a in agent.state["page"]["actions"] if a["label"] == "Next page")
+    stub(monkeypatch, [("CLICK", link["id"])])
+    agent.command("tick")
+    assert agent.state["page"]["url"].endswith("nav_two.html") and offered()
+    backs = 0
+    while offered():
+        stub(monkeypatch, [("BACK", "back")])
+        agent.command("tick")
+        backs += 1
+        assert backs <= 2
+    assert backs >= 1 and "back" not in {a["id"] for a in agent.state["page"]["actions"]}
+    assert [h["kind"] for h in agent.state["history"]] == ["click", *["back"] * backs]
+    assert agent.state["refused"] == []
+
+
+def test_enter_in_a_form_whose_server_answers_late_observes_the_new_page(start, monkeypatch):
+    stub(monkeypatch, [key("Enter")])
+    agent = start("keys_slow_form.html", max_steps=1)
+    list(agent.run())
+    assert agent.state["page"]["title"] == "Slow result"
+    assert agent.state["history"][0]["page_changed"] is True and agent.state["history"][0]["url"].endswith("?q=x")
+    assert [h["kind"] for h in agent.state["history"]] == ["key"]  # One submit, not two.
+
+
+def test_without_the_commit_window_the_slow_submit_is_observed_as_the_old_page(start, monkeypatch):
+    stub(monkeypatch, [key("Enter")])
+    agent = start("keys_slow_form.html", max_steps=1, navigation_commit_ms=0)
+    list(agent.run())
+    assert agent.state["page"]["title"] == "Slow form"  # The control: the wait is what makes the difference.
+
+
+def test_a_click_on_a_link_whose_server_answers_late_observes_the_new_page(start, monkeypatch):
+    agent = start("click_slow.html", max_steps=1)
+    link = next(a for a in agent.state["page"]["actions"] if a["label"] == "Open slow page")
+    stub(monkeypatch, [("CLICK", link["id"])])
+    list(agent.run())
+    assert agent.state["page"]["title"] == "Slow result"
+    assert agent.state["history"][0]["page_changed"] is True
+
+
+def test_a_click_that_does_not_navigate_pays_no_commit_window(start, monkeypatch):
+    def click_count(page, goal, history, refused=()):
+        a = next(a for a in page["actions"] if a["label"].startswith("Count"))
+        return {"choice": a["id"], "operation": "CLICK", "target": "1", "confidence": 1.0,
+                "probabilities": {a["id"]: 1.0}, "latency_ms": 1, "usage": {}}
+
+    monkeypatch.setattr(loop, "choose", click_count)
+    medians = {}
+    for commit_ms in (0, 1000):
+        agent = start("nav_one.html", max_steps=10, navigation_commit_ms=commit_ms)
+        times = []
+        for _ in range(5):
+            began = time.perf_counter()
+            agent.command("tick")
+            times.append(time.perf_counter() - began)
+        medians[commit_ms] = statistics.median(times)
+        assert agent.browser.evaluate("window.counter") == 5
+    added = medians[1000] - medians[0]
+    print(f"non-navigating click: median {medians[0] * 1000:.0f} ms with the window off, "
+          f"{medians[1000] * 1000:.0f} ms on, added {added * 1000:.0f} ms")
+    assert added < 0.4  # The window is 1 s; a click that starts no navigation must not spend it.

@@ -22,6 +22,14 @@ class StalePage(ValueError):
 class Refused(StalePage):
     """The pointer already moved onto the target, then the press was refused. Nothing was pressed."""
 
+    pointer_moved = True
+
+
+class Unavailable(Refused):
+    """The action cannot run (BACK with no previous page). Nothing was sent and the pointer did not move."""
+
+    pointer_moved = False
+
 
 NAVIGATION = {"back", "reload", "goto"}
 
@@ -29,7 +37,7 @@ NAVIGATION = {"back", "reload", "goto"}
 def control_actions(info, keys, urls):
     """Target-less and caller-declared controls. Keys and URLs come from the caller, never from the model."""
     extra = [{"id": f"key:{k}", "kind": "key", "key": k, "name": k, "label": f"Press {k}"} for k in keys]
-    if info.get("history_length", 0) > 1:
+    if info.get("can_go_back"):
         extra.append({"id": "back", "kind": "back", "label": "Go back to the previous page"})
     extra.append({"id": "reload", "kind": "reload", "label": "Reload the current page"})
     extra += [
@@ -50,10 +58,13 @@ class Browser:
         keys=(),
         urls=None,
         navigation_timeout_ms=15000,
+        navigation_commit_ms=1000,
     ):
         self.keys = offered_keys(keys)
         self.urls = dict(urls or {})
         self.navigation_timeout_ms = navigation_timeout_ms
+        self.navigation_commit_ms = navigation_commit_ms
+        self.navigation_before = None
         self.settle_ms = settle_ms
         self.reveal_timeout_ms = reveal_timeout_ms
         self.autocomplete_settle_ms = autocomplete_settle_ms
@@ -79,7 +90,43 @@ class Browser:
             raise StalePage("Document changed during evaluation")
         return response.get("result", {}).get("value")
 
+    def mark_navigation(self):
+        """Remember the document before an input that may navigate (a key, a click, a select)."""
+        if not getattr(self, "navigation_commit_ms", 0):
+            return
+        try:
+            self.navigation_before = self.evaluate(
+                "(() => { const c=window.__jevFast; if (c) c.navigating=false;"
+                " return [performance.timeOrigin, location.href]; })()"
+            )
+        except (StalePage, RuntimeError):
+            self.navigation_before = None
+
+    def await_commit(self, before):
+        """If the input made the document commit a navigation within navigation_commit_ms, wait for the new one.
+
+        Where the page reports that no navigation even started, this returns after one read: a click that does
+        not navigate costs a single round trip, not the window.
+        """
+        deadline = time.monotonic() + self.navigation_commit_ms / 1000
+        while True:
+            try:
+                now = self.evaluate(
+                    "[performance.timeOrigin, location.href, window.__jevFast?.navigating ?? null]"
+                )
+            except (StalePage, RuntimeError):
+                now = None  # The old context is gone: the new document committed.
+            if now is None or now[:2] != before:
+                self.wait_for_document(before)
+                return
+            if now[2] is False or time.monotonic() >= deadline:
+                return
+            time.sleep(0.02)
+
     def observe(self, screenshot=True):
+        before, self.navigation_before = getattr(self, "navigation_before", None), None
+        if before:
+            self.await_commit(before)
         if getattr(self, "after_input", None):
             action, self.after_input = self.after_input, None
             # This is read-only and happens after execution was logged, even if navigation interrupts it.
@@ -134,9 +181,10 @@ class Browser:
             # The key goes to whatever has focus: the same document, and the same focused element in the same state.
             focus = page.get("focus")
             current = self.evaluate(
-                "(() => { const c=window.__jevFast; return c ? [c.pageKey(),c.focused()?.guard ?? null] : null; })()"
+                "(() => { const c=window.__jevFast; if (!c) return null; const f=c.focused();"
+                " return [c.pageKey(), f?.node ?? null, f?.guard ?? null]; })()"
             )
-            return current == [page["page_key"], focus["guard"] if focus else None]
+            return current == [page["page_key"], focus["node"] if focus else None, focus["guard"] if focus else None]
         if action is not None and action["kind"] in {"click", "select", "hover"}:
             node = action["node"]
             if type(node) is not int:
@@ -158,6 +206,7 @@ class Browser:
             self.after_input = action
             return {"executed": action["id"]}
         if action["kind"] == "key":
+            self.mark_navigation()
             for event in key_events(action["key"]):
                 self.call("Input.dispatchKeyEvent", **event)
             self.after_input = action
@@ -165,6 +214,8 @@ class Browser:
         if "node" in action:
             # The press-time check compares this guard again after the pointer has moved.
             action = {**action, "guard": page.get("guards", {}).get(str(action["node"]))}
+        if action["kind"] in {"click", "select"}:
+            self.mark_navigation()
         result = browser_operation(
             {
                 "operation": "act",
@@ -185,12 +236,16 @@ class Browser:
             history = self.call("Page.getNavigationHistory")
             index = history["currentIndex"] - 1
             if index < 0:
-                raise StalePage("There is no previous page. Observe again.")
+                raise Unavailable("There is no previous page. Not sent.")
             self.call("Page.navigateToHistoryEntry", entryId=history["entries"][index]["id"])
         elif kind == "reload":
             self.call("Page.reload")
         else:
             self.call("Page.navigate", url=action["url"])
+        self.wait_for_document(before)
+
+    def wait_for_document(self, before):
+        """Wait (bounded by navigation_timeout_ms) for a complete document other than the one in `before`."""
         deadline = time.monotonic() + self.navigation_timeout_ms / 1000
         while time.monotonic() < deadline:
             try:
@@ -209,6 +264,13 @@ class Browser:
 
 def fingerprint(state):
     content = {k: state[k] for k in ("url", "text", "actions", "scroll")} | {"focus": state.get("focus")}
+    return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
+
+
+def content_fingerprint(state):
+    """The page without keyboard focus. Moving focus is not progress, so the stuck rule compares this instead."""
+    actions = [{k: v for k, v in a.items() if k != "focused"} for a in state["actions"]]
+    content = {k: state[k] for k in ("url", "text", "scroll")} | {"actions": actions}
     return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
 
 
@@ -331,6 +393,7 @@ def browser_operation(request):
     info = evaluate(READ_STATE)
     if info is None:
         raise StalePage("Document is navigating")
+    info["can_go_back"] = call("Page.getNavigationHistory")["currentIndex"] > 0
     info["actions"] += control_actions(info, request.get("keys", ()), request.get("urls", {}))
     info["fingerprint"] = fingerprint(info)
     if request.get("screenshot", True):

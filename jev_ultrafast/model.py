@@ -52,8 +52,10 @@ def action_space(actions):
     for action in actions:
         kind = action["kind"]
         if kind in {"key", "goto"}:
-            # Caller-declared choices, addressed by name; they refer to no observed element.
-            targets.setdefault("PRESS_KEY" if kind == "key" else "GOTO", {})[action["name"]] = action
+            # Caller-declared choices; they refer to no observed element. Numbered like every other head, the
+            # key or page name travels inside the criterion.
+            group = targets.setdefault("PRESS_KEY" if kind == "key" else "GOTO", {})
+            group[str(len(group) + 1)] = action
             continue
         if kind not in operations:
             controls[action["id"].upper()] = action

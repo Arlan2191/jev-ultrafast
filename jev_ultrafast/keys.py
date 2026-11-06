@@ -55,13 +55,16 @@ def validate_keys(keys):
     """Caller-declared chords: at least one modifier, and never a bare Shift on a character (that types text)."""
     if isinstance(keys, str) or not isinstance(keys, (list, tuple)):
         raise ValueError("keys must be a sequence of key chords")
+    normal = []
     for chord in keys:
         mods, key = parse_key(chord)
         if not mods:
             raise ValueError(f"Invalid key {chord!r}: declare a chord with a modifier, plain keys are already offered")
         if set(mods) == {"Shift"} and len(key) == 1:
             raise ValueError(f"Invalid key {chord!r}: Shift with a character types text")
-    return tuple(dict.fromkeys(keys))
+        # Control+k and Control+K are one keystroke: offer it once, as Control+K.
+        normal.append("+".join([*mods, key.upper() if len(key) == 1 else key]))
+    return tuple(dict.fromkeys(normal))
 
 
 def offered_keys(declared):
