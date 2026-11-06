@@ -135,7 +135,7 @@ node --check jev_ultrafast/snapshot.js
 uv build
 ```
 
-Tests are offline. `uv run python scripts/check_guards.py` checks real controls in a local browser without model calls. Live examples and recording scripts make paid API calls. `scripts/record_flights.py <new-folder>` captures original browser timestamps; `scripts/render_demo.py <recording-folder>` renders that verified run at 1× and crops out the Google account strip. Credentials and raw traces stay ignored.
+Tests are offline. `BU_CDP_URL=http://127.0.0.1:9222 uv run pytest -m browser` runs the real-browser fixture tests (`tests/browser/`, pages in `tests/fixtures/`) against a Chrome started with `--remote-debugging-port=9222`; CI runs them in headless Chrome, and without `BU_CDP_URL` they skip. `uv run python scripts/check_guards.py` is the standalone version of the guard checks. None of them make model calls. Live examples and recording scripts make paid API calls. `scripts/record_flights.py <new-folder>` captures original browser timestamps; `scripts/render_demo.py <recording-folder>` renders that verified run at 1× and crops out the Google account strip. Credentials and raw traces stay ignored.
 
 ---
 
