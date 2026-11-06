@@ -214,12 +214,15 @@ def test_enter_in_a_form_whose_server_answers_late_observes_the_new_page(start, 
     assert [h["kind"] for h in agent.state["history"]] == ["key"]  # One submit, not two.
 
 
-def test_without_the_commit_window_the_slow_submit_is_observed_as_the_old_page(start, monkeypatch):
+def test_a_server_slower_than_the_settle_is_awaited_only_inside_the_commit_window(start, monkeypatch):
+    # 2.5 s is slower than any settle, so the old page is what an unguarded observation sees (the control).
     stub(monkeypatch, [key("Enter")])
-    agent = start("keys_slow_form.html", navigation_commit_ms=0)
-    agent.command("tick")
-    # The control: the wait is what makes the difference.
-    assert agent.state["page"]["title"] == "Slow form" and agent.state["history"][0]["page_changed"] is False
+    off = start("keys_very_slow_form.html", navigation_commit_ms=0)
+    off.command("tick")
+    assert off.state["page"]["title"] == "Very slow form" and off.state["history"][0]["page_changed"] is False
+    on = start("keys_very_slow_form.html", navigation_commit_ms=5000)
+    on.command("tick")
+    assert on.state["page"]["title"] == "Slow result" and on.state["history"][0]["page_changed"] is True
 
 
 def test_a_click_on_a_link_whose_server_answers_late_observes_the_new_page(start, monkeypatch):
