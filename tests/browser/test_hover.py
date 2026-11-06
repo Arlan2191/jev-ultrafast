@@ -151,9 +151,29 @@ def test_agent_click_on_a_reveal_candidate_hovers_first(agent, monkeypatch):
     assert run.browser.evaluate("window.counts.copy") == 1
 
 
-def test_agent_refused_honeypot_logs_nothing_as_executed(agent, monkeypatch):
-    stub(monkeypatch, [("CLICK", "Remove everything")])
-    run = agent(max_steps=1, reveal_timeout_ms=50, max_model_calls=2)
+def test_agent_refused_honeypot_logs_nothing_as_executed_and_is_not_offered_again(agent, monkeypatch):
+    offered = []
+
+    def choose(page, goal, history, refused=()):
+        present = any(a["label"] == "Remove everything" for a in page["actions"])
+        offered.append(present)
+        action = find(page, "Remove everything") if present else None
+        choice = action["id"] if action else "BLOCKED"
+        return {
+            "choice": choice,
+            "operation": "CLICK" if action else "BLOCKED",
+            "target": "1",
+            "confidence": 1.0,
+            "probabilities": {choice: 1.0},
+            "latency_ms": 1,
+            "usage": {},
+        }
+
+    monkeypatch.setattr(loop, "choose", choose)
+    run = agent(max_steps=3, reveal_timeout_ms=50)
     list(run.run())
     assert run.state["history"] == []
     assert run.browser.evaluate("window.counts.honeypot") == 0
+    assert offered == [True, False]  # Refused once, then hidden while the page is unchanged.
+    assert [r["label"] for r in run.state["refused"]] == ["Remove everything"]
+    assert run.state["status"] == "blocked"
