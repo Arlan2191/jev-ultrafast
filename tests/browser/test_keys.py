@@ -255,3 +255,12 @@ def test_a_click_that_does_not_navigate_pays_no_commit_window(start, monkeypatch
     print(f"non-navigating click: median {medians[0] * 1000:.0f} ms with the window off, "
           f"{medians[1000] * 1000:.0f} ms on, added {added * 1000:.0f} ms")
     assert added < 0.4  # The window is 1 s; a click that starts no navigation must not spend it.
+
+
+@pytest.mark.parametrize("name", ["keys_slow_form", "keys_very_slow_form", "diag_4000", "diag_8000"])
+def test_diag_off(start, monkeypatch, name):
+    stub(monkeypatch, [key("Enter")])
+    agent = start(f"{name}.html", navigation_commit_ms=0)
+    began = time.perf_counter()
+    agent.command("tick")
+    print(f"DIAG {name}: tick {time.perf_counter() - began:.2f}s title={agent.state['page']['title']!r}")
