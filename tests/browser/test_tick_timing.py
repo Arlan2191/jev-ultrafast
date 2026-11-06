@@ -64,7 +64,7 @@ def stub_click(monkeypatch):
     monkeypatch.setattr(loop, "choose", choose)
 
 
-@pytest.mark.parametrize("new_window", [False, True])
+@pytest.mark.parametrize("new_window", [False, True, None])
 def test_one_click_tick_breakdown(open_page, fixture_base_url, monkeypatch, new_window):
     open_page("tick_button.html")  # Skips (or fails in CI) when no browser is configured.
     stub_click(monkeypatch)
@@ -101,6 +101,9 @@ def test_one_click_tick_breakdown(open_page, fixture_base_url, monkeypatch, new_
             start = time.perf_counter()
             agent.browser.evaluate("1")
             floor.append((time.perf_counter() - start) * 1000)
+        used = agent.browser.new_window
+        if new_window is None:
+            assert used is True  # Auto picks a window of its own in headless Chrome.
         recorder.calls.clear()
         recorder.phases.clear()
         ticks = []
@@ -113,7 +116,8 @@ def test_one_click_tick_breakdown(open_page, fixture_base_url, monkeypatch, new_
         agent.close()
 
     lines = [
-        f"### Click tick breakdown (stubbed model, headless Chrome, new_window={new_window})",
+        f"### Click tick breakdown (stubbed model, headless Chrome, new_window={new_window!r}, "
+        f"window used: {used})",
         f"- Runtime.evaluate('1') round trip: median {statistics.median(floor):.1f} ms, max {max(floor):.1f} ms",
         f"- tick ms (12 ticks): {', '.join(f'{t:.0f}' for t in ticks)}; median {statistics.median(ticks):.0f}",
         "",

@@ -179,3 +179,138 @@ def test_a_plain_click_adds_almost_no_latency_for_the_post_action_settle(start, 
         assert agent.browser.last_action_settle is None  # Nothing was pending, so no settled() ran.
     print(f"plain click tick, median of 5: settle off {medians[0]:.1f} ms, on {medians[5000]:.1f} ms")
     assert medians[5000] - medians[0] < 30, medians
+
+
+# Timers (S2): only timers pending when a wait begins hold it, and the threshold is a knob.
+
+
+def test_a_polling_page_settles_because_later_timers_never_hold_the_wait(start):
+    agent = start("poll.html", ignore_urls=["/api/50"])
+    result = agent.wait_for("settled", quiet_ms=300, timeout_ms=6000)
+    # The pending poll timer (400 ms) holds the wait once; the timer its continuation arms afterwards does not.
+    assert result.met is True and result.waited_ms < 2500, result
+    assert agent.browser.evaluate("window.polls") >= 1
+
+
+def test_the_poll_timer_is_not_waited_for_when_timer_counting_is_off(start):
+    agent = start("poll.html", ignore_urls=["/api/50"], wait_timer_ms=0)
+    result = agent.wait_for("settled", quiet_ms=100, timeout_ms=6000)
+    assert result.met is True and result.waited_ms < 600, result
+
+
+def timer_wait(start, delay, **kwargs):
+    agent = start("blank.html", **kwargs)
+    agent.browser.evaluate(f"window.fired = false; setTimeout(() => {{ window.fired = true; }}, {delay}); 1")
+    result = agent.wait_for("settled", quiet_ms=0, timeout_ms=8000)
+    return result, agent.browser.evaluate("window.fired")
+
+
+def test_a_timer_of_exactly_the_threshold_is_waited_for_and_one_millisecond_more_is_not(start):
+    held, fired = timer_wait(start, 2000)
+    assert fired is True and held.waited_ms >= 1700, held
+    not_held, fired = timer_wait(start, 2001)
+    assert fired is False and not_held.waited_ms < 1000, not_held
+
+
+def test_the_timer_threshold_is_a_knob(start):
+    short, fired = timer_wait(start, 600, wait_timer_ms=500)
+    assert fired is False and short.waited_ms < 400, short
+    longer, fired = timer_wait(start, 3000, wait_timer_ms=3000)
+    assert fired is True and longer.waited_ms >= 2700, longer
+
+
+# Agent(ignore_urls): the escape hatch works for WAIT and for the post-action settle (S1).
+
+
+def click_poll(start, monkeypatch, **kwargs):
+    stub(monkeypatch, [("CLICK", "Poll")])
+    agent = start("events.html", max_steps=1, **kwargs)
+    began = time.monotonic()
+    agent.command("tick")
+    return agent, (time.monotonic() - began) * 1000
+
+
+def test_an_ignored_long_request_started_by_a_click_does_not_slow_the_tick(start, monkeypatch):
+    agent, took = click_poll(start, monkeypatch, ignore_urls=["/hang"], action_settle_timeout_ms=3000)
+    assert agent.browser.last_action_settle is None and took < 1500, took
+
+
+def test_an_unignored_long_request_started_by_a_click_costs_the_settle_timeout(start, monkeypatch):
+    agent, took = click_poll(start, monkeypatch, action_settle_timeout_ms=1200)
+    assert agent.browser.last_action_settle.met is False and took >= 1200, took
+
+
+def test_an_ignored_long_request_does_not_block_wait(start, monkeypatch):
+    stub(monkeypatch, [("CLICK", "Poll"), ("WAIT", "wait")])
+    agent = start("events.html", max_steps=2, ignore_urls=[re.compile("/ha+ng$")], action_settle_timeout_ms=0)
+    agent.command("tick")
+    agent.command("tick")
+    entry = agent.state["history"][1]
+    assert entry["kind"] == "wait" and entry["met"] is True and entry["waited_ms"] < 2500, entry
+
+
+def test_a_plain_click_on_a_polling_page_does_not_wait_for_the_pages_own_timers(start, monkeypatch):
+    stub(monkeypatch, [("CLICK", "Press me")])
+    agent = start("poll.html", ignore_urls=["/api/50"], max_steps=1)
+    began = time.monotonic()
+    agent.command("tick")
+    # Timers the page armed before the click are not caused by it.
+    assert agent.browser.last_action_settle is None and (time.monotonic() - began) < 1.5
+
+
+# DOM attribute noise and a document that stays "interactive" (S9).
+
+
+ANIMATE = (
+    "const bar = document.createElement('div'); document.body.append(bar); let n = 0;"
+    " const timer = setInterval(() => { bar.style.width = (++n) + 'px'; if (n >= 100) clearInterval(timer); }, 20); 1"
+)
+
+
+def test_attribute_noise_keeps_the_dom_busy_unless_the_attribute_is_ignored(start):
+    agent = start("blank.html")
+    agent.browser.evaluate(ANIMATE)
+    busy = agent.wait_for("dom_quiet", quiet_ms=200, timeout_ms=700)
+    ignored = agent.wait_for("dom_quiet", quiet_ms=200, timeout_ms=700, ignore_attributes=("style",))
+    print(
+        f"style animation: default met={busy.met} in {busy.waited_ms} ms; "
+        f"style ignored met={ignored.met} in {ignored.waited_ms} ms"
+    )
+    assert busy.met is False and ignored.met is True and ignored.waited_ms < 500
+
+
+def test_the_agent_level_ignored_attributes_apply_to_settled(start):
+    agent = start("blank.html", wait_ignore_attributes=("style",))
+    agent.browser.evaluate(ANIMATE)
+    assert agent.wait_for("settled", quiet_ms=200, timeout_ms=700).met is True
+    # A child list change is not an attribute: it still counts.
+    agent.browser.evaluate("setInterval(() => document.body.append(document.createElement('i')), 20); 1")
+    assert agent.wait_for("settled", quiet_ms=200, timeout_ms=500).met is False
+
+
+def test_a_document_stuck_interactive_counts_as_loaded_after_the_grace_period(start):
+    agent = start("blank.html", wait_interactive_grace_ms=600)
+    agent.browser.evaluate("location.href = '/interactive.html'; 1")
+    result = agent.wait_for("settled", quiet_ms=100, timeout_ms=8000)
+    assert result.met is True and result.waited_ms < 6000, result
+    assert agent.browser.evaluate("document.readyState") == "interactive"
+
+
+def test_a_document_still_loading_is_not_settled(start):
+    agent = start("blank.html", wait_interactive_grace_ms=60000)
+    agent.browser.evaluate("location.href = '/interactive.html'; 1")
+    result = agent.wait_for("settled", quiet_ms=100, timeout_ms=1500)
+    assert result.met is False and "still loading" in result.reason, result
+
+
+# A page-side error is raised, not waited out (S4), and element text_stable needs text (N7).
+
+
+def test_text_stable_of_an_element_that_has_no_text_yet_is_not_stable(start):
+    agent = start("stream.html")
+    early = agent.wait_for("text_stable", quiet_ms=100, role="textbox", name="Answer", timeout_ms=600)
+    assert early.met is False and "not started" in early.reason
+    anywhere = agent.wait_for(
+        "text_stable", quiet_ms=100, role="textbox", name="Answer", timeout_ms=600, require_text=False
+    )
+    assert anywhere.met is True

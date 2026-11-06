@@ -148,19 +148,18 @@ def test_a_navigation_during_a_wait_waits_for_the_new_document_then_continues():
         side_effect=[
             page_result({"met": False, "reason": "the DOM is still changing", "document": [1, "a"]}),
             RuntimeError("Execution context was destroyed."),
+            page_result([2, "b", "complete"]),  # The page answers again, with another document.
             page_result({"met": True, "reason": "settled", "document": [2, "b"]}),
         ]
     )
-    b.wait_for_document = Mock()
     result = b.settled(100, 5000)
     assert result.met is True
-    assert b.wait_for_document.call_args.args[0] == [1, "a"]  # Waits for any document other than the last seen.
+    assert b.call.call_count == 4
 
 
 def test_a_page_that_stays_in_transition_times_out_with_a_reason():
     b = bare()
     b.call = Mock(side_effect=RuntimeError("Execution context was destroyed."))
-    b.wait_for_document = Mock()
     result = b.settled(100, 80)
     assert result.met is False and result.reason == "timeout: the page is navigating"
 
@@ -222,24 +221,26 @@ def runner():
     return a
 
 
+def quiet(**fields):
+    return {"epoch": "e1", "seq": 3, "inflight": 0, "new_started": 0, "timers": 0, **fields}
+
+
 def settle_browser(timeout=5000, seen=None):
     b = bare()
     b.action_settle_timeout_ms, b.action_settle_quiet_ms = timeout, 150
-    b.activity_seen = seen or {"epoch": "e1", "started": 3}
+    b.activity_seen = seen or quiet()
     b.settled = Mock(return_value=WaitResult(True, 7, "settled"))
-    b.activity = Mock(return_value={"epoch": "e1", "started": 4, "inflight": 0, "timers": 0})
+    b.activity = Mock(return_value=quiet(seq=4))
     return b
 
 
 @pytest.mark.parametrize(
     "activity, expected",
     [
-        ({"epoch": "e1", "started": 3, "inflight": 0, "timers": 0}, False),  # Nothing happened.
-        ({"epoch": "e1", "started": 3, "inflight": 1, "timers": 0}, True),  # A request is in flight.
-        ({"epoch": "e1", "started": 3, "inflight": 0, "timers": 2}, True),  # A short timer is pending.
-        ({"epoch": "e1", "started": 4, "inflight": 0, "timers": 0}, True),  # A request started and already ended.
-        ({"epoch": "e2", "started": 1, "inflight": 0, "timers": 0}, False),  # A new document is awaited elsewhere.
-        ({"epoch": "e2", "started": 1, "inflight": 1, "timers": 0}, True),
+        (quiet(), False),  # Nothing happened.
+        (quiet(inflight=1), True),  # A counted request is in flight.
+        (quiet(timers=2), True),  # A short timer was armed since the last read.
+        (quiet(new_started=1), True),  # A counted request started and already ended.
         (None, False),
     ],
 )
@@ -248,7 +249,7 @@ def test_the_post_action_settle_triggers_only_when_something_is_pending(activity
     b.settle_after_action(activity)
     assert b.settled.called is expected
     if expected:
-        b.settled.assert_called_once_with(150, 5000)
+        b.settled.assert_called_once_with(150, 5000, timers_since={"epoch": "e1", "since": 3})
         assert b.last_action_settle.met is True
     else:
         assert b.last_action_settle is None
@@ -257,27 +258,28 @@ def test_the_post_action_settle_triggers_only_when_something_is_pending(activity
 def test_an_idle_action_adds_no_cdp_round_trip_and_updates_the_baseline():
     b = settle_browser()
     b.call = Mock()
-    b.settle_after_action({"epoch": "e1", "started": 3, "inflight": 0, "timers": 0})
+    b.settle_after_action(quiet(seq=9))
     b.call.assert_not_called()
     b.activity.assert_not_called()
-    assert b.activity_seen["started"] == 3
+    assert b.activity_seen["seq"] == 9
 
 
 def test_action_settle_can_be_turned_off():
     b = settle_browser(timeout=0)
-    b.settle_after_action({"epoch": "e1", "started": 9, "inflight": 2, "timers": 1})
+    b.settle_after_action(quiet(inflight=2, timers=1))
     b.settled.assert_not_called()
 
 
-def test_needs_settle_is_false_without_a_baseline_unless_something_is_pending():
-    assert needs_settle({"epoch": "e", "started": 5, "inflight": 0, "timers": 0}, {}) is False
-    assert needs_settle({"epoch": "e", "started": 5, "inflight": 1, "timers": 0}, {}) is True
+def test_needs_settle_looks_only_at_the_counters_the_page_already_filtered():
+    assert needs_settle(quiet()) is False
+    assert needs_settle(quiet(inflight=1)) is True
+    assert needs_settle(None) is False
 
 
 def test_observe_hands_the_settle_scripts_activity_to_the_post_action_settle(monkeypatch):
     b = bare()
     b.after_input = {"kind": "click", "node": 1}
-    seen = {"epoch": "e1", "started": 1, "inflight": 1, "timers": 0}
+    seen = quiet(inflight=1)
     b.call = Mock(return_value=page_result(seen))
     b.settle_after_action = Mock()
     monkeypatch.setattr(browser_module, "browser_operation", lambda _request: {"ok": True})
@@ -373,3 +375,282 @@ def test_a_met_wait_on_an_unchanged_page_does_not_count(runner):
         runner.state["decision"] = {**decision("wait"), "operation": "WAIT"}
         runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
     assert runner.state["status"] == "ready"
+
+
+# S1 ignore_urls, S2 timers, S9 attributes: they reach the page-side spec.
+
+
+def sent_specs(b):
+    import json
+
+    pattern_ = r"\.run\((.*)\) \?\? null\)$"
+    return [json.loads(re.search(pattern_, c.kwargs["expression"])[1]) for c in b.call.call_args_list]
+
+
+def test_browser_wide_knobs_are_part_of_every_wait_spec():
+    b = bare()
+    b.ignore = ignore_patterns(["/poll"])
+    b.wait_timer_ms, b.wait_interactive_grace_ms, b.wait_ignore_attributes = 750, 1200, ("style",)
+    b.call = Mock(return_value=page_result({"met": True, "reason": "settled", "document": [1, "a"]}))
+    b.settled(100, 1000, ignore_urls=["/extra"])
+    spec = sent_specs(b)[0]
+    assert spec["ignore"] == [{"s": "/poll"}, {"s": "/extra"}]
+    assert (spec["timer_ms"], spec["interactive_grace_ms"], spec["ignore_attributes"]) == (750, 1200, ["style"])
+
+
+def test_a_call_can_override_the_ignored_attributes_and_set_the_timer_baseline():
+    b = bare()
+    b.call = Mock(return_value=page_result({"met": True, "reason": "dom_quiet", "document": [1, "a"]}))
+    b.dom_quiet(100, 1000, ignore_attributes=("class", "style"))
+    assert sent_specs(b)[0]["ignore_attributes"] == ["class", "style"]
+    b.settled(100, 1000, timers_since={"epoch": "e1", "since": 7})
+    assert sent_specs(b)[1]["epoch"] == "e1" and sent_specs(b)[1]["timers_since"] == 7
+
+
+def test_text_stable_requires_text_for_an_element_but_not_for_the_whole_page():
+    b = bare()
+    b.call = Mock(return_value=page_result({"met": True, "reason": "text_stable", "document": [1, "a"]}))
+    b.text_stable(100, role="textbox", name="Answer")
+    b.text_stable(100)
+    b.text_stable(100, role="textbox", require_text=False)
+    assert [spec["require_text"] for spec in sent_specs(b)] == [True, False, False]
+    with pytest.raises(ValueError, match="require_text"):
+        b.text_stable(100, require_text="yes")
+
+
+def test_the_activity_baseline_and_filters_go_to_the_page():
+    import json
+
+    b = bare()
+    b.ignore, b.wait_timer_ms = ignore_patterns(["/poll"]), 900
+    b.activity_seen = {"epoch": "e1", "seq": 5}
+    b.evaluate = Mock(return_value={"epoch": "e1", "seq": 6})
+    assert b.activity() == {"epoch": "e1", "seq": 6}
+    sent = b.evaluate.call_args.args[0]
+    assert sent.startswith("(window.__jevWait?.activity(") and "(function" not in sent
+    assert json.loads(re.search(r"activity\((.*)\) \?\? null", sent)[1]) == {
+        "epoch": "e1", "since": 5, "ignore": [{"s": "/poll"}], "timer_ms": 900,
+    }
+
+
+# The tracker is only sent when the page does not have it.
+
+
+def test_the_tracker_text_is_sent_only_when_the_page_has_none():
+    b = bare()
+    b.call = Mock(
+        side_effect=[page_result(None), page_result({"met": True, "reason": "settled", "document": [1, "a"]})]
+    )
+    assert b.settled(100, 1000).met is True
+    first, second = (c.kwargs["expression"] for c in b.call.call_args_list)
+    assert first.startswith("(window.__jevWait?.run(") and len(first) < 600
+    assert second.startswith("(") and "__jevWait" in second and len(second) > 5000
+    b.call = Mock(return_value=page_result({"met": True, "reason": "settled", "document": [1, "a"]}))
+    b.settled(100, 1000)
+    assert b.call.call_count == 1
+
+
+# S3: a busy page never makes a wait raise.
+
+
+def test_a_busy_page_is_an_unmet_slice_not_an_exception():
+    b = bare()
+    b.call = Mock(side_effect=TimeoutError("Runtime.evaluate timed out after 5s waiting for the daemon"))
+    result = b.settled(100, 150)
+    assert result.met is False and result.reason == "timeout: the page is navigating"
+    assert b.activity() is None
+
+
+def test_each_slice_waits_longer_for_the_daemon_than_the_slice_itself():
+    b = bare()
+    b.call = Mock(return_value=page_result({"met": True, "reason": "settled", "document": [1, "a"]}))
+    b.settled(100, 5000)
+    assert b.call.call_args.kwargs["_response_timeout"] == browser_module.WAIT_SLICE_MS / 1000 + 3
+
+
+def test_a_transient_error_on_a_settled_document_returns_promptly():
+    b = bare()
+    b.call = Mock(
+        side_effect=[
+            RuntimeError("Cannot find context with specified id"),
+            page_result([1, "a", "complete"]),  # Same document, nothing navigated.
+            page_result({"met": True, "reason": "settled", "document": [1, "a"]}),
+        ]
+    )
+    started = time.monotonic()
+    assert b.settled(100, 30000).met is True
+    assert time.monotonic() - started < 1
+
+
+def test_the_wait_for_a_document_after_an_error_is_bounded_by_the_navigation_timeout():
+    b = bare()
+    b.navigation_timeout_ms = 120
+    b.call = Mock(side_effect=RuntimeError("Execution context was destroyed."))
+    started = time.monotonic()
+    assert b._after_error([1, "a"], time.monotonic() + 30) == [1, "a"]
+    assert time.monotonic() - started < 1  # Not the 30 s that remain of the wait.
+
+
+# S4: an exception in the page is raised, a regex is checked up front.
+
+
+def test_a_page_side_exception_is_raised_at_once_with_its_text():
+    b = bare()
+    b.call = Mock(
+        return_value={
+            "result": {"type": "object"},
+            "exceptionDetails": {
+                "text": "Uncaught",
+                "exception": {"description": "SyntaxError: Invalid regular expression"},
+            },
+        }
+    )
+    with pytest.raises(ValueError, match="SyntaxError: Invalid regular expression"):
+        b.text("x", timeout_ms=30000)
+    assert b.call.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [r"(?P<x>a)", r"\Aa", r"a\Z", r"(?i)a", r"(?i:a)", r"a++", r"a*+", r"(?>a)", r"(a)?(?(1)b|c)", r"(?#note)a"],
+)
+def test_python_only_regex_syntax_is_rejected_before_the_page_sees_it(source):
+    b = bare()
+    b._wait = Mock()
+    with pytest.raises(ValueError, match="JavaScript RegExp"):
+        b.element(name=re.compile(source))
+    b._wait.assert_not_called()
+
+
+@pytest.mark.parametrize("flags", [re.VERBOSE, re.ASCII])
+def test_unsupported_regex_flags_are_rejected(flags):
+    b = bare()
+    b._wait = Mock()
+    with pytest.raises(ValueError, match="flags are supported"):
+        b.text(re.compile("a", flags))
+
+
+@pytest.mark.parametrize(
+    "source", [r"^cop", r"(?<=a)b", r"[a\\A]", r"a+?", r"a\+\+", r"(?:a|b){2,3}", r"\bchunk \d+"]
+)
+def test_javascript_compatible_regexes_pass(source):
+    assert pattern("x", re.compile(source))["r"] == source
+
+
+# S5: the window default.
+
+
+def make_browser(monkeypatch, product, **kwargs):
+    calls = []
+
+    def cdp(method, **params):
+        calls.append((method, params))
+        return {
+            "Browser.getVersion": {"product": product},
+            "Target.createTarget": {"targetId": "t"},
+            "Target.attachToTarget": {"sessionId": "s"},
+        }.get(method, {})
+
+    monkeypatch.setattr(browser_module, "ensure_daemon", lambda: None)
+    monkeypatch.setattr(browser_module, "cdp", cdp)
+    monkeypatch.setattr(Browser, "evaluate", lambda self, expression: "complete")
+    monkeypatch.setattr(Browser, "activity", lambda self: None)
+    browser = Browser("https://example.test/", **kwargs)
+    return browser, calls
+
+
+@pytest.mark.parametrize(
+    "product, option, expected",
+    [
+        ("HeadlessChrome/130.0.0.0", None, True),
+        ("Chrome/130.0.0.0", None, False),
+        ("Chrome/130.0.0.0", True, True),
+        ("HeadlessChrome/130.0.0.0", False, False),
+    ],
+)
+def test_the_owned_tab_gets_its_own_window_only_where_it_was_measured(monkeypatch, product, option, expected):
+    browser, calls = make_browser(monkeypatch, product, new_window=option)
+    created = next(params for method, params in calls if method == "Target.createTarget")
+    assert created["newWindow"] is expected and created["background"] is True and browser.new_window is expected
+    assert any(m == "Browser.getVersion" for m, _ in calls) is (option is None)
+
+
+def test_page_enable_is_not_sent(monkeypatch):
+    _, calls = make_browser(monkeypatch, "HeadlessChrome/130")
+    assert "Page.enable" not in [m for m, _ in calls]
+    assert "Page.addScriptToEvaluateOnNewDocument" in [m for m, _ in calls]
+
+
+def test_the_body_cap_is_built_into_the_tracker_that_is_installed(monkeypatch):
+    _, calls = make_browser(monkeypatch, "HeadlessChrome/130", body_cap_ms=1234)
+    source = next(p["source"] for m, p in calls if m == "Page.addScriptToEvaluateOnNewDocument")
+    assert "BODY_CAP_MS = 1234" in source and "__BODY_CAP_MS__" not in source and "__A11Y__" not in source
+
+
+# Agent arguments of this round.
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"wait_timer_ms": -1},
+        {"wait_timer_ms": 2.5},
+        {"body_cap_ms": 0},
+        {"wait_interactive_grace_ms": -1},
+        {"new_window": "yes"},
+        {"ignore_urls": [3]},
+        {"ignore_urls": [re.compile("(?P<x>a)")]},
+        {"wait_ignore_attributes": [3]},
+    ],
+)
+def test_the_new_wait_arguments_are_validated_before_a_browser_opens(kwargs, monkeypatch):
+    opened = Mock()
+    monkeypatch.setattr(loop, "Browser", opened)
+    with pytest.raises(ValueError):
+        Agent("https://example.test/", "goal", **kwargs)
+    opened.assert_not_called()
+
+
+def test_the_new_wait_arguments_reach_the_browser(monkeypatch):
+    opened = Mock(return_value=Mock(observe=Mock(return_value=page())))
+    monkeypatch.setattr(loop, "Browser", opened)
+    Agent(
+        "https://example.test/",
+        "goal",
+        ignore_urls=["/poll"],
+        wait_timer_ms=0,
+        body_cap_ms=5000,
+        wait_ignore_attributes=("style",),
+        wait_interactive_grace_ms=0,
+        new_window=False,
+    )
+    kwargs = opened.call_args.kwargs
+    assert kwargs["ignore_urls"] == ["/poll"] and kwargs["wait_timer_ms"] == 0 and kwargs["body_cap_ms"] == 5000
+    assert kwargs["wait_ignore_attributes"] == ("style",) and kwargs["wait_interactive_grace_ms"] == 0
+    assert kwargs["new_window"] is False
+
+
+# S6: a WAIT is an action like any other for the policy hook.
+
+
+def test_a_wait_reaches_before_action_like_any_action(runner):
+    seen = []
+    runner.before_action = lambda action, page, text: seen.append(action["kind"])
+    runner.state["browser"].act.return_value = {
+        "executed": "wait",
+        "wait": {"met": True, "waited_ms": 5, "reason": "settled"},
+    }
+    runner.state["decision"] = {**decision("wait"), "operation": "WAIT"}
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert seen == ["wait"]
+
+
+def test_a_vetoed_wait_is_not_executed(runner):
+    def deny(action, page, text):
+        raise loop.ActionDenied("no waiting")
+
+    runner.before_action = deny
+    runner.state["decision"] = {**decision("wait"), "operation": "WAIT"}
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    runner.state["browser"].act.assert_not_called()
+    assert runner.state["status"] == "denied"

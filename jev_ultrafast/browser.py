@@ -13,6 +13,7 @@ from browser_harness.helpers import cdp
 from .keys import key_events, offered_keys
 from .waits import (
     WaitResult,
+    attribute_names,
     element_state,
     ignore_patterns,
     needs_settle,
@@ -25,14 +26,18 @@ from .waits import (
 A11Y = Path(__file__).with_name("a11y.js").read_text()
 
 
-def script(name):
-    return Path(__file__).with_name(name).read_text().replace("__A11Y__", A11Y)
+def script(name, **placeholders):
+    text = Path(__file__).with_name(name).read_text().replace("__A11Y__", A11Y)
+    for key, value in placeholders.items():
+        text = text.replace(key, str(value))
+    return text
 
 
 # Atomically read visible content and controls, preserving actual DOM node identity.
 READ_STATE = script("snapshot.js")
 # Page-side request/timer/DOM tracker and condition checks. Idempotent: evaluating it again returns the installed one.
-TRACKER = script("waits.js")
+# The default is only a template; each Browser builds its own with its body_cap_ms.
+TRACKER = script("waits.js", __BODY_CAP_MS__=30000)
 # One page-side wait call is at most this long, so it stays inside browser-harness's IPC response timeout.
 WAIT_SLICE_MS = 2000
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
@@ -75,7 +80,13 @@ class Browser:
     action_settle_timeout_ms = 5000
     action_settle_quiet_ms = 150
     last_action_settle = None
-    activity_seen = {}
+    wait_timer_ms = 2000
+    wait_interactive_grace_ms = 2000
+    navigation_timeout_ms = 15000
+    activity_seen = None
+    ignore = []
+    wait_ignore_attributes = ()
+    tracker = TRACKER
 
     def __init__(
         self,
@@ -91,14 +102,24 @@ class Browser:
         wait_timeout_ms=30000,
         action_settle_timeout_ms=5000,
         action_settle_quiet_ms=150,
-        new_window=True,
+        new_window=None,
+        ignore_urls=(),
+        wait_timer_ms=2000,
+        body_cap_ms=30000,
+        wait_ignore_attributes=(),
+        wait_interactive_grace_ms=2000,
     ):
-        self.wait_quiet_ms = wait_quiet_ms
-        self.wait_timeout_ms = wait_timeout_ms
-        self.action_settle_timeout_ms = action_settle_timeout_ms
-        self.action_settle_quiet_ms = action_settle_quiet_ms
+        self.wait_quiet_ms = non_negative("wait_quiet_ms", wait_quiet_ms)
+        self.wait_timeout_ms = positive("wait_timeout_ms", wait_timeout_ms)
+        self.action_settle_timeout_ms = non_negative("action_settle_timeout_ms", action_settle_timeout_ms)
+        self.action_settle_quiet_ms = non_negative("action_settle_quiet_ms", action_settle_quiet_ms)
+        self.wait_timer_ms = non_negative("wait_timer_ms", wait_timer_ms)
+        self.wait_interactive_grace_ms = non_negative("wait_interactive_grace_ms", wait_interactive_grace_ms)
+        self.ignore = ignore_patterns(ignore_urls)
+        self.wait_ignore_attributes = attribute_names(wait_ignore_attributes)
+        self.tracker = script("waits.js", __BODY_CAP_MS__=positive("body_cap_ms", body_cap_ms))
         self.last_action_settle = None
-        self.activity_seen = {}
+        self.activity_seen = None
         self.keys = offered_keys(keys)
         self.urls = dict(urls or {})
         self.navigation_timeout_ms = navigation_timeout_ms
@@ -106,18 +127,22 @@ class Browser:
         self.reveal_timeout_ms = reveal_timeout_ms
         self.autocomplete_settle_ms = autocomplete_settle_ms
         ensure_daemon()
-        # An owned tab in the user's window is a background tab: after a few clicks Chrome throttles its frames to
-        # about 1 Hz, and every pointer move then waits ~1 s for the next frame. A window of its own stays at full rate.
+        # In headless Chrome an owned tab in the existing window is a background tab: after a few clicks Chrome
+        # throttles its frames to about 1 Hz and every pointer move then waits ~1 s for the next frame. A window of
+        # its own stays at full rate. Headed Chrome was not measured and a new window is a visible one, so by default
+        # (new_window=None) only a headless browser gets it; True or False force it.
+        if new_window is None:
+            new_window = "HeadlessChrome" in cdp("Browser.getVersion").get("product", "")
+        self.new_window = bool(new_window)
         self.target = cdp(
-            "Target.createTarget", url="about:blank", background=True, newWindow=bool(new_window)
+            "Target.createTarget", url="about:blank", background=True, newWindow=self.new_window
         )["targetId"]
         self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
         self.call("Emulation.setDeviceMetricsOverride", width=1120, height=780, deviceScaleFactor=1, mobile=False)
         # Keep rAF/menus rendering in an owned background tab, without activating the user's Chrome tab.
         self.call("Emulation.setFocusEmulationEnabled", enabled=True)
         # The tracker must exist before the page's own scripts run, so it sees their requests and timers.
-        self.call("Page.enable")
-        self.call("Page.addScriptToEvaluateOnNewDocument", source=TRACKER)
+        self.call("Page.addScriptToEvaluateOnNewDocument", source=self.tracker)
         self.call("Page.navigate", url=url)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -143,12 +168,12 @@ class Browser:
             try:
                 response = self.call(
                     "Runtime.evaluate",
-                    expression="""((action, settleMs, autocompleteSettleMs) => new Promise(resolve => {
+                    expression="""((action, settleMs, autocompleteSettleMs, tracker) => new Promise(resolve => {
                       const field=window.__jevFast?.nodes.get(action.node);
                       const autocomplete=action.kind==='fill' && field?.getAttribute('role')==='combobox';
                       let frames=0, stopped=false, raf=0;
                       const finish=()=>{
-                        stopped=true;cancelAnimationFrame(raf);resolve(window.__jevWait?.activity() ?? null);
+                        stopped=true;cancelAnimationFrame(raf);resolve(window.__jevWait?.activity(tracker) ?? null);
                       };
                       // The tracker's own timer: this settle is not page activity.
                       (window.__jevWait?.timeout ?? setTimeout)(finish,autocomplete ? autocompleteSettleMs : settleMs);
@@ -166,12 +191,13 @@ class Browser:
                         else raf=requestAnimationFrame(ready);
                       };
                       raf=requestAnimationFrame(ready);
-                    }))(""" + f"{json.dumps(action)},{int(self.settle_ms)},{int(self.autocomplete_settle_ms)})",
+                    }))(""" + f"{json.dumps(action)},{int(self.settle_ms)},{int(self.autocomplete_settle_ms)},"
+                    f"{json.dumps(self.activity_spec())})",
                     awaitPromise=True,
                     returnByValue=True,
                 )
                 activity = (response or {}).get("result", {}).get("value")
-            except RuntimeError:
+            except (RuntimeError, TimeoutError):
                 pass
             self.settle_after_action(activity)
         for attempt in range(10):
@@ -266,35 +292,88 @@ class Browser:
         while time.monotonic() < deadline:
             try:
                 now = self.evaluate("[performance.timeOrigin, location.href, document.readyState]")
-            except (StalePage, RuntimeError):
-                now = None  # The old context is going away.
+            except (StalePage, RuntimeError, TimeoutError):
+                now = None  # The old context is going away, or the page is too busy to answer yet.
             if now and now[2] == "complete" and now[:2] != before:
                 return
             time.sleep(0.02)
 
+    def activity_spec(self):
+        """What the page-side counters need: the baseline to count from, the ignore list and the timer threshold."""
+        seen = self.activity_seen or {}
+        return {
+            "epoch": seen.get("epoch"),
+            "since": seen.get("seq", 0),
+            "ignore": self.ignore,
+            "timer_ms": self.wait_timer_ms,
+        }
+
     def activity(self):
-        """Counters of the page-side tracker: {epoch, started, inflight, timers}, or None while navigating."""
+        """Counters of the page-side tracker ({epoch, seq, inflight, new_started, timers}, with ignore_urls and the
+        timer threshold applied), or None while navigating or when the page is too busy to answer."""
+        call = f"activity({json.dumps(self.activity_spec())})"
         try:
-            return self.evaluate(f"({TRACKER}).activity()")
-        except (StalePage, RuntimeError):
+            return self.evaluate(f"(window.__jevWait?.{call} ?? null)") or self.evaluate(f"({self.tracker}).{call}")
+        except (StalePage, RuntimeError, TimeoutError):
             return None
 
     def mark_activity(self):
         """Everything up to now is accounted for; the next action only reacts to what starts after this."""
-        self.activity_seen = self.activity() or {}
+        self.activity_seen = self.activity()
 
     def settle_after_action(self, activity):
-        """After an action's fixed settle: if requests or short timers are pending (or a request started), wait for
-        the page to settle, bounded by action_settle_timeout_ms. Adds no round trip when nothing is pending."""
+        """After an action's fixed settle: if counted requests or short timers are pending (or a request started or a
+        timer was armed since the last read), wait for the page to settle, bounded by action_settle_timeout_ms. Adds
+        no round trip when nothing is pending."""
         self.last_action_settle = None
-        if activity and self.action_settle_timeout_ms and needs_settle(activity, self.activity_seen):
-            self.last_action_settle = self.settled(self.action_settle_quiet_ms, self.action_settle_timeout_ms)
+        if activity and self.action_settle_timeout_ms and needs_settle(activity):
+            seen = self.activity_seen or {}
+            self.last_action_settle = self.settled(
+                self.action_settle_quiet_ms,
+                self.action_settle_timeout_ms,
+                timers_since={"epoch": seen.get("epoch"), "since": seen.get("seq", 0)},
+            )
             activity = self.activity()
-        self.activity_seen = activity or {}
+        self.activity_seen = activity
+
+    def _spec(self, kind, ignore_urls=(), **fields):
+        """The page-side description of a wait, with the Browser-wide knobs filled in."""
+        return {
+            "kind": kind,
+            "ignore": self.ignore + ignore_patterns(ignore_urls),
+            "timer_ms": self.wait_timer_ms,
+            "interactive_grace_ms": self.wait_interactive_grace_ms,
+            "ignore_attributes": list(self.wait_ignore_attributes),
+            **fields,
+        }
+
+    def _run_slice(self, request):
+        """One page-side slice. The 9 KB tracker is only sent when the page does not have it yet."""
+        call = f"run({json.dumps(request)})"
+        extra = {"awaitPromise": True, "returnByValue": True, "_response_timeout": WAIT_SLICE_MS / 1000 + 3}
+        response = self.call("Runtime.evaluate", expression=f"(window.__jevWait?.{call} ?? null)", **extra)
+        if not response.get("exceptionDetails") and response.get("result", {}).get("value") is None:
+            response = self.call("Runtime.evaluate", expression=f"({self.tracker}).{call}", **extra)
+        return response
+
+    def _after_error(self, document, deadline):
+        """A slice failed (the page navigated, or is too busy to answer). Wait, bounded by navigation_timeout_ms and
+        the deadline, until the page answers with a document that has started to load; then slice again. A transient
+        error on the same document returns at once."""
+        end = min(deadline, time.monotonic() + self.navigation_timeout_ms / 1000)
+        while time.monotonic() < end:
+            try:
+                now = self.evaluate("[performance.timeOrigin, location.href, document.readyState]")
+            except (StalePage, RuntimeError, TimeoutError):
+                now = None
+            if now and now[2] != "loading":
+                return now[:2]
+            time.sleep(0.02)
+        return document
 
     def _wait(self, spec, timeout_ms):
-        """Run a page-side condition in slices until it holds or timeout_ms passes. Never raises on timeout. A
-        navigation that destroys the page mid-wait waits for the new document (bounded) and carries on there."""
+        """Run a page-side condition in slices until it holds or timeout_ms passes. Never raises on timeout, and a
+        busy or navigating page is just an unmet slice. A page-side exception (a bug in the condition) is raised."""
         start = time.monotonic()
         deadline = start + timeout_ms / 1000
         spec = {**spec, "key": uuid.uuid4().hex}
@@ -302,50 +381,51 @@ class Browser:
         while True:
             remaining_ms = (deadline - time.monotonic()) * 1000
             request = {**spec, "slice_ms": max(0, min(WAIT_SLICE_MS, remaining_ms))}
+            outcome = None
             try:
-                response = self.call(
-                    "Runtime.evaluate",
-                    expression=f"({TRACKER}).run({json.dumps(request)})",
-                    awaitPromise=True,
-                    returnByValue=True,
-                )
-                outcome = None if response.get("exceptionDetails") else response.get("result", {}).get("value")
-            except RuntimeError:
-                outcome = None  # The old context is going away.
+                response = self._run_slice(request)
+                details = response.get("exceptionDetails")
+                if details:
+                    text = (details.get("exception") or {}).get("description") or details.get("text")
+                    raise ValueError(f"The wait failed in the page: {text}")
+                outcome = response.get("result", {}).get("value")
+            except (RuntimeError, TimeoutError):
+                pass  # The old context is going away, or the page is busy: this slice is unmet.
             if outcome and outcome["met"]:
                 return WaitResult(True, round((time.monotonic() - start) * 1000), outcome["reason"])
             if outcome:
                 document, reason = outcome["document"], outcome["reason"]
             else:
                 reason = "the page is navigating"
-                self.wait_for_document(document, max(0, (deadline - time.monotonic()) * 1000))
+                document = self._after_error(document, deadline)
                 time.sleep(0.02)
             if time.monotonic() >= deadline:
                 return WaitResult(False, round((time.monotonic() - start) * 1000), f"timeout: {reason}")
 
-    def dom_quiet(self, quiet_ms=500, timeout_ms=30000):
-        """No DOM mutation (child list, character data, attributes) for quiet_ms."""
-        spec = {"kind": "dom_quiet", "quiet_ms": non_negative("quiet_ms", quiet_ms)}
+    def dom_quiet(self, quiet_ms=500, timeout_ms=30000, ignore_attributes=None):
+        """No DOM mutation (child list, character data, attributes) for quiet_ms. Attribute changes by name in
+        ignore_attributes (default: the Browser's wait_ignore_attributes) do not count."""
+        spec = self._spec("dom_quiet", quiet_ms=non_negative("quiet_ms", quiet_ms))
+        if ignore_attributes is not None:
+            spec["ignore_attributes"] = list(attribute_names(ignore_attributes))
         return self._wait(spec, positive("timeout_ms", timeout_ms))
 
     def network_idle(self, idle_ms=500, ignore_urls=(), timeout_ms=30000):
         """No in-flight fetch or XMLHttpRequest for idle_ms. WebSockets and EventSource are never counted;
-        ignore_urls (substrings or compiled regexes, matched against the absolute URL) skips other long-lived ones."""
-        spec = {
-            "kind": "network_idle",
-            "idle_ms": non_negative("idle_ms", idle_ms),
-            "ignore": ignore_patterns(ignore_urls),
-        }
+        ignore_urls (substrings or compiled regexes, matched against the absolute URL, added to the Browser's own)
+        skips other long-lived ones."""
+        spec = self._spec("network_idle", ignore_urls, idle_ms=non_negative("idle_ms", idle_ms))
         return self._wait(spec, positive("timeout_ms", timeout_ms))
 
-    def settled(self, quiet_ms=500, timeout_ms=30000, ignore_urls=()):
-        """The document is fully loaded (also after a navigation that commits meanwhile), no counted request is in
-        flight or finished within quiet_ms, no short one-shot timer is pending, and the DOM was quiet for quiet_ms."""
-        spec = {
-            "kind": "settled",
-            "quiet_ms": non_negative("quiet_ms", quiet_ms),
-            "ignore": ignore_patterns(ignore_urls),
-        }
+    def settled(self, quiet_ms=500, timeout_ms=30000, ignore_urls=(), ignore_attributes=None, timers_since=None):
+        """The document is loaded (also after a navigation that commits meanwhile), no counted request is in flight or
+        finished within quiet_ms, no short one-shot timer that was pending when the wait began is still pending, and
+        the DOM was quiet for quiet_ms. timers_since ({epoch, since}) limits the held timers to those armed after it."""
+        spec = self._spec("settled", ignore_urls, quiet_ms=non_negative("quiet_ms", quiet_ms))
+        if ignore_attributes is not None:
+            spec["ignore_attributes"] = list(attribute_names(ignore_attributes))
+        if timers_since:
+            spec["epoch"], spec["timers_since"] = timers_since["epoch"], timers_since["since"]
         return self._wait(spec, positive("timeout_ms", timeout_ms))
 
     def element(self, role=None, name=None, state=None, present=True, timeout_ms=30000):
@@ -355,33 +435,34 @@ class Browser:
             raise ValueError("role must be a string")
         if type(present) is not bool:
             raise ValueError("present must be a boolean")
-        spec = {
-            "kind": "element",
-            "role": role,
-            "name": pattern("name", name, optional=True),
-            "state": element_state(state),
-            "present": present,
-        }
+        spec = self._spec(
+            "element", role=role, name=pattern("name", name, optional=True), state=element_state(state), present=present
+        )
         return self._wait(spec, positive("timeout_ms", timeout_ms))
 
     def text(self, contains, present=True, timeout_ms=30000):
         """The visible document text contains a string or regex (present=True), or no longer does (present=False)."""
         if type(present) is not bool:
             raise ValueError("present must be a boolean")
-        spec = {"kind": "text", "contains": pattern("contains", contains), "present": present}
+        spec = self._spec("text", contains=pattern("contains", contains), present=present)
         return self._wait(spec, positive("timeout_ms", timeout_ms))
 
-    def text_stable(self, quiet_ms=500, role=None, name=None, timeout_ms=30000):
+    def text_stable(self, quiet_ms=500, role=None, name=None, timeout_ms=30000, require_text=None):
         """The visible text of the whole page, or of the element matched by role and name, is unchanged for quiet_ms.
-        Text that has not started to arrive is unchanged too: wait for its first words with text() before."""
+        require_text (default: True for an element, False for the whole page) also asks for some text, so an element
+        that has not started to fill is not "stable"."""
         if role is not None and not isinstance(role, str):
             raise ValueError("role must be a string")
-        spec = {
-            "kind": "text_stable",
-            "quiet_ms": non_negative("quiet_ms", quiet_ms),
-            "role": role,
-            "name": pattern("name", name, optional=True),
-        }
+        if require_text is not None and type(require_text) is not bool:
+            raise ValueError("require_text must be a boolean")
+        element_form = role is not None or name is not None
+        spec = self._spec(
+            "text_stable",
+            quiet_ms=non_negative("quiet_ms", quiet_ms),
+            role=role,
+            name=pattern("name", name, optional=True),
+            require_text=element_form if require_text is None else require_text,
+        )
         return self._wait(spec, positive("timeout_ms", timeout_ms))
 
     def close(self):

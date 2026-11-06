@@ -1,5 +1,7 @@
 """The tracker must not change what the page sees or does: fetch bodies, cancellation, backpressure, XHR, timers."""
 
+import json
+import os
 import time
 
 import pytest
@@ -131,6 +133,8 @@ def test_xhr_behaviour_is_preserved(blank):
           out.abort = await once(x, () => { x.send(); x.abort(); });
           x = new XMLHttpRequest(); x.open('GET', 'http://127.0.0.1:1/');
           out.error = await once(x, () => x.send());
+          // The page's own loadend handlers run before the tracker's, so let the last one finish first.
+          await new Promise(resolve => setTimeout(resolve, 50));
           x = new XMLHttpRequest(); x.open('GET', '/api/0', false); x.send();
           out.sync = [x.status, x.responseText, window.__jevWait.inflight.size];
           return out;
@@ -167,3 +171,81 @@ def test_timers_behave_like_native_timers(blank):
     assert value["id"] == "number" and value["self"] is True and value["args"] == [1, "two"]
     assert value["cleared"] is True and "boom" in value["threw"] and value["string"] == 7
     assert value["dropped"] == 0
+
+
+# How the tracker learns that a request ended: measured on Chrome, printed as a table.
+
+
+@pytest.fixture
+def capped(fixture_base_url):
+    from jev_ultrafast.browser import Browser
+
+    opened = []
+
+    def open_(cap):
+        browser = Browser(f"{fixture_base_url}/blank.html", body_cap_ms=cap)
+        opened.append(browser)
+        return browser
+
+    yield open_
+    for browser in opened:
+        browser.close()
+
+
+SCENARIOS = {
+    "small body read with text()": "fetch('/api/0').then(r => r.text())",
+    "small body never read": "fetch('/api/0').then(() => 1)",
+    "streamed body read to the end (3 s)": (
+        "fetch('/stream').then(async r => { const rd = r.body.getReader();"
+        " while (!(await rd.read()).done); return 1; })"
+    ),
+    "large body never read": "fetch('/big?id=m-unread').then(() => 1)",
+    "stream cancelled by the reader": (
+        "fetch('/endless?id=m-cancel').then(async r => { const rd = r.body.getReader(); await rd.read();"
+        " await rd.cancel(); return 1; })"
+    ),
+    "stream aborted by AbortController": (
+        "(async () => { const ac = new AbortController(); const r = await fetch('/endless?id=m-abort',"
+        " {signal: ac.signal}); const rd = r.body.getReader(); await rd.read(); ac.abort(); return 1; })()"
+    ),
+    "XMLHttpRequest": (
+        "new Promise(resolve => { const x = new XMLHttpRequest(); x.open('GET', '/api/0');"
+        " x.onloadend = () => resolve(1); x.send(); })"
+    ),
+}
+
+
+def test_how_each_kind_of_request_is_released(capped):
+    """Records which signal ended each request (entry, abort, rejected, loadend, or the cap) and how long it took."""
+    browser = capped(3000)
+    rows = []
+    for label, expression in SCENARIOS.items():
+        before = browser.evaluate("JSON.stringify(window.__jevWait.stats)")
+        started = time.monotonic()
+        run(browser, expression)
+        released = until(lambda: inflight(browser) == 0, 6)
+        took = round((time.monotonic() - started) * 1000)
+        after = browser.evaluate("JSON.stringify(window.__jevWait.stats)")
+        gained = {k: v - json.loads(before)[k] for k, v in json.loads(after).items() if v != json.loads(before)[k]}
+        rows.append((label, released, took, gained))
+        assert released, f"{label} was never released"
+    lines = ["### How a request is released (cap 3000 ms, headless Chrome)", "", "| scenario | released | ms | by |",
+             "| --- | --- | --- | --- |"]
+    lines += [f"| {label} | {released} | {took} | {gained} |" for label, released, took, gained in rows]
+    report = "\n".join(lines)
+    print(report)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a") as handle:
+            handle.write(report + "\n\n")
+
+
+def test_a_body_nobody_reads_is_released_by_the_cap(capped):
+    browser = capped(1500)
+    run(browser, "fetch('/big?id=capped').then(() => 1)")
+    began = time.monotonic()
+    assert inflight(browser) == 1
+    assert until(lambda: inflight(browser) == 0, 6)
+    held = time.monotonic() - began
+    assert 1.0 <= held <= 4.0, held
+    assert browser.evaluate("window.__jevWait.stats.cap") == 1

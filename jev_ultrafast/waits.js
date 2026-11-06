@@ -1,82 +1,113 @@
 (() => {
   // In-page activity tracker and condition checks. Installed on every new document (and evaluated once on the current
-  // one), so it sees the page's own requests and timers from the start. It never changes what the page receives.
+  // one), so it sees the page's own requests and timers from the start. It never changes what the page receives:
+  // fetch, XMLHttpRequest and the timer functions are Proxies that forward every call unchanged and only note it.
   if (window.__jevWait) return window.__jevWait;
+  if (window.parent !== window) return null; // The main frame only.
   const {visible, name, selector, role} = __A11Y__;
-  const SHORT_TIMER_MS = 2000, MAX_ENDS = 500;
+  const BODY_CAP_MS = __BODY_CAP_MS__, MAX_ENDS = 500, MAX_STARTS = 500;
   const nativeSet = window.setTimeout.bind(window), nativeClear = window.clearTimeout.bind(window);
   const now = () => performance.now();
-  const w = {epoch: Math.random().toString(36).slice(2), started: 0, inflight: new Map(), ends: [],
-    timers: new Set(), lastMutation: now(), stable: new Map()};
+  const w = {epoch: Math.random().toString(36).slice(2), inflight: new Map(), ends: [], starts: [], timers: new Map(),
+    holds: new Map(), stable: new Map(), lastOther: now(), attrLast: new Map(), interactiveAt: now(),
+    stats: {entry: 0, cap: 0, rejected: 0, abort: 0, loadend: 0}};
   let seq = 0;
 
-  const begin = url => { const id = ++seq; w.inflight.set(id, url); w.started++; return id; };
-  const end = id => {
-    if (!w.inflight.has(id)) return;
-    w.ends.push([w.inflight.get(id), now()]);
+  // A request is in flight from the call until (1) its promise rejects or the page aborts it, (2) the browser reports
+  // its resource-timing entry, (3) XHR fires loadend, or (4) body_cap_ms after the response headers arrived.
+  const begin = (url, kind) => {
+    const id = ++seq;
+    w.inflight.set(id, {url, kind, timer: 0});
+    w.starts.push([id, url]);
+    if (w.starts.length > MAX_STARTS) w.starts.shift();
+    return id;
+  };
+  const end = (id, how) => {
+    const entry = w.inflight.get(id);
+    if (!entry) return;
+    nativeClear(entry.timer);
+    w.stats[how]++;
+    w.ends.push([entry.url, now()]);
     if (w.ends.length > MAX_ENDS) w.ends.shift();
     w.inflight.delete(id);
   };
-  const absolute = value => { try { return new URL(String(value), location.href).href; } catch { return String(value); } };
+  const absolute = value => {
+    try { const url = new URL(String(value), location.href); url.hash = ''; return url.href; } catch { return String(value); }
+  };
+  const wrap = (target, apply) => new Proxy(target, {apply});
 
-  // DOM mutations (childList, characterData, attributes) anywhere in the document.
-  new MutationObserver(() => { w.lastMutation = now(); })
-    .observe(document, {subtree: true, childList: true, characterData: true, attributes: true});
+  // DOM mutations (child list, character data, attributes) anywhere in the document; attributes by name, so a caller
+  // can ignore the ones a script rewrites every frame.
+  new MutationObserver(records => {
+    const at = now();
+    for (const record of records) {
+      if (record.type === 'attributes') w.attrLast.set(record.attributeName, at);
+      else w.lastOther = at;
+    }
+  }).observe(document, {subtree: true, childList: true, characterData: true, attributes: true});
+  document.addEventListener('readystatechange', () => {
+    if (document.readyState === 'interactive') w.interactiveAt = now();
+  });
 
-  // fetch: in flight until the response body is fully read, or the request fails or aborts. The body is only
-  // counted on a clone of the response, so the page receives the original response and data untouched.
-  const nativeFetch = window.fetch;
-  if (nativeFetch) {
-    window.fetch = function (input) {
-      const id = begin(absolute(input instanceof Request ? input.url : input));
-      let promise;
-      try { promise = nativeFetch.apply(this, arguments); } catch (error) { end(id); throw error; }
-      return promise.then(response => {
-        try {
-          if (!response.body) end(id);
-          else {
-            const reader = response.clone().body.getReader();
-            const pump = () => reader.read().then(chunk => chunk.done ? end(id) : pump(), () => end(id));
-            pump();
-          }
-        } catch { end(id); }
-        return response;
-      }, error => { end(id); throw error; });
-    };
-  }
+  // The page's own fetch result is returned untouched: no clone, no tee, no wrapped body. The counter only notes the
+  // call, and the browser's resource-timing entries say when a request finished (see the PerformanceObserver below).
+  window.fetch = wrap(window.fetch, (target, self, args) => {
+    const [input, init] = args;
+    const id = begin(absolute(input instanceof Request ? input.url : input), 'fetch');
+    let promise;
+    try { promise = Reflect.apply(target, self, args); } catch (error) { end(id, 'rejected'); throw error; }
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : null);
+    if (signal) signal.addEventListener('abort', () => end(id, 'abort'), {once: true});
+    promise.then(() => {
+      const entry = w.inflight.get(id);
+      if (entry) entry.timer = nativeSet(() => end(id, 'cap'), BODY_CAP_MS);
+    }, () => end(id, 'rejected'));
+    return promise;
+  });
 
   // XMLHttpRequest (asynchronous): in flight until loadend.
   const meta = new WeakMap(), xhr = XMLHttpRequest.prototype;
-  const nativeOpen = xhr.open, nativeSend = xhr.send;
-  xhr.open = function (method, url, async) {
-    meta.set(this, {url: absolute(url), async: async !== false});
-    return nativeOpen.apply(this, arguments);
-  };
-  xhr.send = function () {
-    const info = meta.get(this);
-    if (!info?.async) return nativeSend.apply(this, arguments);
-    const id = begin(info.url);
-    this.addEventListener('loadend', () => end(id), {once: true});
-    try { return nativeSend.apply(this, arguments); } catch (error) { end(id); throw error; }
-  };
+  xhr.open = wrap(xhr.open, (target, self, args) => {
+    meta.set(self, {url: absolute(args[1]), async: args[2] !== false});
+    return Reflect.apply(target, self, args);
+  });
+  xhr.send = wrap(xhr.send, (target, self, args) => {
+    const info = meta.get(self);
+    if (!info?.async) return Reflect.apply(target, self, args);
+    const id = begin(info.url, 'xmlhttprequest');
+    self.addEventListener('loadend', () => end(id, 'loadend'), {once: true});
+    try { return Reflect.apply(target, self, args); } catch (error) { end(id, 'rejected'); throw error; }
+  });
 
-  // Timers: a one-shot timer of at most SHORT_TIMER_MS that the page starts outside another timer callback is
-  // pending activity (a script that navigates or renders after a short delay). A timer started from inside a timer
-  // callback is a polling or animation chain and is never counted, so such a page can still settle.
-  let inTimer = 0;
-  window.setTimeout = function (callback, delay, ...args) {
-    if (typeof callback !== 'function') return nativeSet(callback, delay, ...args);
-    const tracked = !inTimer && !(Number(delay) > SHORT_TIMER_MS);
+  // Resource timing: an entry for a fetch or XHR means the browser finished that request (body included, whether or
+  // not the page read it). Paired with the oldest started request of the same kind and absolute URL.
+  try {
+    new PerformanceObserver(list => {
+      for (const entry of list.getEntries()) {
+        if (entry.initiatorType !== 'fetch' && entry.initiatorType !== 'xmlhttprequest') continue;
+        const url = absolute(entry.name);
+        for (const [id, open] of w.inflight) {
+          if (open.kind === entry.initiatorType && open.url === url) { end(id, 'entry'); break; }
+        }
+      }
+    }).observe({type: 'resource', buffered: false});
+  } catch { /* the hard cap releases a body that is never reported */ }
+
+  // Timers: every setTimeout with a callback is noted (delay and order), nothing else changes. A wait only holds for
+  // short timers that were already pending when it began (see `hold`), so a polling chain cannot extend it.
+  window.setTimeout = wrap(window.setTimeout, (target, self, args) => {
+    const [callback, delay, ...rest] = args;
+    if (typeof callback !== 'function') return Reflect.apply(target, self, args);
+    const wait = Number(delay) || 0;
     let id;
-    id = nativeSet(function () {
-      if (tracked) w.timers.delete(id);
-      inTimer++;
-      try { return callback.apply(this, arguments); } finally { inTimer--; }
-    }, delay, ...args);
-    if (tracked) w.timers.add(id);
+    const wrapped = function () { w.timers.delete(id); return callback.apply(this, arguments); };
+    id = Reflect.apply(target, self, [wrapped, wait, ...rest]);
+    w.timers.set(id, {delay: Math.max(0, wait), seq: ++seq});
     return id;
-  };
-  window.clearTimeout = id => { w.timers.delete(id); nativeClear(id); };
+  });
+  for (const method of ['clearTimeout', 'clearInterval']) {
+    window[method] = wrap(window[method], (target, self, args) => { w.timers.delete(args[0]); return Reflect.apply(target, self, args); });
+  }
 
   const matcher = pattern => {
     if (pattern == null) return () => true;
@@ -88,7 +119,7 @@
     return text => text.includes(pattern.s);
   };
   const ignored = spec => {
-    const tests = (spec.ignore || []).map(p => p.r !== undefined ? (re => u => re.test(u))(new RegExp(p.r, p.f || ''))
+    const tests = (spec?.ignore || []).map(p => p.r !== undefined ? (re => u => re.test(u))(new RegExp(p.r, p.f || ''))
       : u => u.includes(p.s));
     return url => tests.some(test => test(url));
   };
@@ -109,18 +140,31 @@
   };
   const pageText = () => document.body?.innerText ?? '';
 
+  const counted = spec => { const skip = ignored(spec); return [...w.inflight.values()].filter(open => !skip(open.url)); };
+  // Pending timers of at most timer_ms (0 turns timer counting off) armed after `since`, in the epoch it belongs to.
+  const shortTimers = (spec, since) => spec.timer_ms > 0
+    ? [...w.timers].filter(([, t]) => t.delay <= spec.timer_ms && t.seq > since).map(([id]) => id) : [];
+  const lastDom = ignore => {
+    let last = w.lastOther;
+    for (const [attribute, at] of w.attrLast) if (!(ignore || []).includes(attribute) && at > last) last = at;
+    return last;
+  };
+  const loaded = spec => document.readyState === 'complete' ||
+    (document.readyState === 'interactive' && now() - w.interactiveAt >= spec.interactive_grace_ms && !counted(spec).length);
+
   const checks = {
-    dom_quiet: spec => now() - w.lastMutation >= spec.quiet_ms ? null : 'the DOM is still changing',
+    dom_quiet: spec => now() - lastDom(spec.ignore_attributes) >= spec.quiet_ms ? null : 'the DOM is still changing',
     network_idle(spec) {
-      const skip = ignored(spec);
-      const open = [...w.inflight.values()].filter(url => !skip(url)).length;
+      const open = counted(spec).length;
       if (open) return open + ' request(s) in flight';
+      const skip = ignored(spec);
       const last = Math.max(0, ...w.ends.filter(([url]) => !skip(url)).map(([, at]) => at));
       return now() - last >= spec.idle_ms ? null : 'a request finished less than ' + spec.idle_ms + ' ms ago';
     },
     settled(spec) {
-      if (document.readyState !== 'complete') return 'the document is still loading';
-      if (w.timers.size) return w.timers.size + ' short timer(s) pending';
+      if (!loaded(spec)) return 'the document is still loading';
+      const held = (w.holds.get(spec.key) || []).filter(id => w.timers.has(id)).length;
+      if (held) return held + ' short timer(s) pending';
       return checks.network_idle({...spec, idle_ms: spec.quiet_ms}) || checks.dom_quiet(spec);
     },
     element(spec) {
@@ -136,6 +180,7 @@
       if (spec.role || spec.name) { const e = find(spec); text = e ? e.innerText ?? e.textContent : null; }
       else text = pageText();
       if (text === null) return 'no matching element';
+      if (spec.require_text && !text.trim()) return 'the text has not started';
       const seen = w.stable.get(spec.key);
       if (!seen || seen.text !== text) {
         w.stable.set(spec.key, {text, since: now()});
@@ -145,20 +190,43 @@
       return now() - seen.since >= spec.quiet_ms ? null : 'the text is still changing';
     },
   };
+  // element, text and text_stable scan the document: poll them at four times what one check costs (50 to 250 ms), so
+  // waiting does not compete with the page being waited on. The others are O(1) and polled every 15 ms.
+  const HEAVY = new Set(['element', 'text', 'text_stable']);
 
   w.timeout = nativeSet;
-  w.activity = () => ({epoch: w.epoch, started: w.started, inflight: w.inflight.size, timers: w.timers.size});
+  // Counters for the post-action trigger: counted requests in flight, requests started after `since` (same epoch),
+  // and short timers armed after it. The page-side filter keeps the ignore list in one place.
+  w.activity = spec => {
+    const skip = ignored(spec);
+    const since = spec.epoch === w.epoch ? spec.since : seq;
+    return {epoch: w.epoch, seq, inflight: counted(spec).length,
+      new_started: w.starts.filter(([id, url]) => id > since && !skip(url)).length,
+      timers: shortTimers(spec, since).length};
+  };
   w.document = () => [performance.timeOrigin, location.href];
-  // One slice of a wait: resolves when the condition holds, or after slice_ms with the reason it does not.
-  w.run = spec => new Promise(resolve => {
-    const deadline = now() + spec.slice_ms;
-    const tick = () => {
-      const unmet = checks[spec.kind](spec);
-      if (unmet === null) { w.stable.delete(spec.key); resolve({met: true, reason: spec.kind, document: w.document()}); }
-      else if (now() >= deadline) resolve({met: false, reason: unmet, document: w.document()});
-      else nativeSet(tick, 15);
-    };
-    tick();
+  // One slice of a wait: resolves when the condition holds, or after slice_ms with the reason it does not. The
+  // first slice of a wait fixes which timers can hold it.
+  w.run = spec => new Promise((resolve, reject) => {
+    try {
+      if (spec.kind === 'settled' && !w.holds.has(spec.key)) {
+        w.holds.set(spec.key, shortTimers(spec, spec.epoch === w.epoch ? spec.timers_since ?? 0 : 0));
+        if (w.holds.size > 20) w.holds.delete(w.holds.keys().next().value);
+      }
+      const deadline = now() + spec.slice_ms;
+      const tick = () => {
+        try {
+          const began = now();
+          const unmet = checks[spec.kind](spec);
+          if (unmet === null) {
+            w.stable.delete(spec.key); w.holds.delete(spec.key);
+            resolve({met: true, reason: spec.kind, document: w.document()});
+          } else if (now() >= deadline) resolve({met: false, reason: unmet, document: w.document()});
+          else nativeSet(tick, HEAVY.has(spec.kind) ? Math.min(250, Math.max(50, 4 * (now() - began))) : 15);
+        } catch (error) { reject(error); }
+      };
+      tick();
+    } catch (error) { reject(error); }
   });
   return window.__jevWait = w;
 })()
