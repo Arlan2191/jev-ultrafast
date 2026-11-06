@@ -207,8 +207,8 @@ def test_back_is_offered_only_while_there_is_a_previous_entry(start, monkeypatch
 
 def test_enter_in_a_form_whose_server_answers_late_observes_the_new_page(start, monkeypatch):
     stub(monkeypatch, [key("Enter")])
-    agent = start("keys_slow_form.html", max_steps=1)
-    list(agent.run())
+    agent = start("keys_slow_form.html")
+    agent.command("tick")  # One step: what this single observation shows is what the model would see next.
     assert agent.state["page"]["title"] == "Slow result"
     assert agent.state["history"][0]["page_changed"] is True and agent.state["history"][0]["url"].endswith("?q=x")
     assert [h["kind"] for h in agent.state["history"]] == ["key"]  # One submit, not two.
@@ -216,16 +216,17 @@ def test_enter_in_a_form_whose_server_answers_late_observes_the_new_page(start, 
 
 def test_without_the_commit_window_the_slow_submit_is_observed_as_the_old_page(start, monkeypatch):
     stub(monkeypatch, [key("Enter")])
-    agent = start("keys_slow_form.html", max_steps=1, navigation_commit_ms=0)
-    list(agent.run())
-    assert agent.state["page"]["title"] == "Slow form"  # The control: the wait is what makes the difference.
+    agent = start("keys_slow_form.html", navigation_commit_ms=0)
+    agent.command("tick")
+    # The control: the wait is what makes the difference.
+    assert agent.state["page"]["title"] == "Slow form" and agent.state["history"][0]["page_changed"] is False
 
 
 def test_a_click_on_a_link_whose_server_answers_late_observes_the_new_page(start, monkeypatch):
-    agent = start("click_slow.html", max_steps=1)
+    agent = start("click_slow.html")
     link = next(a for a in agent.state["page"]["actions"] if a["label"] == "Open slow page")
     stub(monkeypatch, [("CLICK", link["id"])])
-    list(agent.run())
+    agent.command("tick")
     assert agent.state["page"]["title"] == "Slow result"
     assert agent.state["history"][0]["page_changed"] is True
 
