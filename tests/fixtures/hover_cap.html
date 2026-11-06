@@ -1,0 +1,17 @@
+<!doctype html><title>Hover cap page</title>
+<style>
+  body { margin: 0; }
+  .row { height: 20px; }
+  .tb { opacity: 0; width: 10px; height: 10px; padding: 0; border: 0; }
+  .row:hover .tb { opacity: 1; }
+  .grid button { width: 10px; height: 10px; padding: 0; border: 0; margin: 0; vertical-align: top; }
+</style>
+<div id="rows"></div>
+<div class="grid" id="grid"></div>
+<script>
+  // 30 hover-revealed controls first in the DOM, then 255 always-visible ones.
+  document.getElementById('rows').innerHTML = Array.from({length: 30},
+    (_, i) => `<div class="row"><button type="button" class="tb" aria-label="Revealed ${i}"></button></div>`).join('');
+  document.getElementById('grid').innerHTML = Array.from({length: 255},
+    (_, i) => `<button type="button" aria-label="Visible ${i}"></button>`).join('');
+</script>

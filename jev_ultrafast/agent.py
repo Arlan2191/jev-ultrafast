@@ -33,7 +33,9 @@ class Agent:
 
     Budgets: max_steps bounds executed actions; max_model_calls bounds TypeSafe decisions plus text-helper calls
     (default 2 * max_steps). Reaching either ends the run with status "budget" and state["stop_reason"].
-    settle_ms / autocomplete_settle_ms cap the post-action wait; stuck_after unchanged non-wait steps in a row
+    settle_ms / autocomplete_settle_ms cap the post-action wait; reveal_timeout_ms bounds how long a click waits
+    for a hover-revealed control to appear after the pointer moves onto it (it is never pressed if it does not);
+    stuck_after unchanged non-wait steps in a row
     end the run as "blocked".
     before_action(action, page, text) runs before each execution attempt, with the final typed text, and receives
     copies, so changing them cannot change what executes. It can run more than once for one intended action if the
@@ -52,6 +54,7 @@ class Agent:
         max_model_calls=None,
         settle_ms=50,
         autocomplete_settle_ms=200,
+        reveal_timeout_ms=500,
         stuck_after=3,
         before_action=None,
     ):
@@ -63,12 +66,18 @@ class Agent:
         self.stuck_after = positive_int("stuck_after", stuck_after)
         positive_int("settle_ms", settle_ms, minimum=0)
         positive_int("autocomplete_settle_ms", autocomplete_settle_ms, minimum=0)
+        positive_int("reveal_timeout_ms", reveal_timeout_ms, minimum=0)
         if before_action is not None and not callable(before_action):
             raise ValueError("before_action must be callable")
         self.before_action = before_action
         plan = [task]
         self.pending_text = None
-        self.browser = Browser(url, settle_ms=settle_ms, autocomplete_settle_ms=autocomplete_settle_ms)
+        self.browser = Browser(
+            url,
+            settle_ms=settle_ms,
+            autocomplete_settle_ms=autocomplete_settle_ms,
+            reveal_timeout_ms=reveal_timeout_ms,
+        )
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
         try:
@@ -155,6 +164,8 @@ class Agent:
                 state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
                 return self.snapshot()
             action = next(a for a in page["actions"] if a["id"] == selected)
+            if decision["operation"] == "HOVER":
+                action = {**action, "kind": "hover"}
             if len(state["history"]) >= self.max_steps:
                 return self.stop("budget", "max_steps")
             text, helper = None, None

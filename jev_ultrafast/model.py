@@ -58,7 +58,9 @@ def action_space(actions):
         if node not in indices:
             index = str(len(elements) + 1)
             indices[node] = index
-            element = {k: action[k] for k in ("role", "value", "checked", "selected", "expanded") if k in action}
+            element = {
+                k: action[k] for k in ("role", "value", "checked", "selected", "expanded", "revealed_by") if k in action
+            }
             element.update(index=index, label=action["label"].split(" → ")[0], operations=[])
             if kind == "select":
                 element["value"] = action.get("current_value", "")
@@ -75,6 +77,12 @@ def action_space(actions):
             target = f"{index}:{len(element['options']) + 1}"
             element["options"].append({"index": target, "label": action["label"], "value": action["value"]})
         group[target] = action
+        if kind == "click":
+            # Hover shares CLICK's candidates; the agent runs it as a pointer move without a press.
+            element = elements[int(index) - 1]
+            if "HOVER" not in element["operations"]:
+                element["operations"].append("HOVER")
+            targets.setdefault("HOVER", {})[target] = action
     return elements, targets, controls
 
 
@@ -84,6 +92,7 @@ def choose(state, goal, history):
         "CLICK": "Click an element, button, menu option, autocomplete suggestion, or calendar day.",
         "TYPE_TEXT": "Enter or replace text in an editable field. A small LLM will supply the value from the goal.",
         "SELECT": "Select an observed dropdown value.",
+        "HOVER": "Move the pointer over an element without pressing, to open a hover menu or tooltip.",
     }
     operations = {key: labels[key] for key in targets}
     operations.update({key: value["label"] for key, value in controls.items()})
@@ -98,7 +107,7 @@ def choose(state, goal, history):
                 index: {
                     "element": f"[{index}] {a['label']}",
                     "current_value": a.get("current_value", a.get("value", "")),
-                    **{k: a[k] for k in ("role", "checked", "selected", "expanded") if k in a},
+                    **{k: a[k] for k in ("role", "checked", "selected", "expanded", "revealed_by") if k in a},
                 }
                 for index, a in candidates.items()
             },

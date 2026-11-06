@@ -1,0 +1,20 @@
+<!doctype html><title>Hover page</title>
+<style>
+  body { font: 14px sans-serif; margin: 16px; }
+  .row { display: flex; align-items: center; gap: 12px; height: 36px; padding: 0 8px; border: 1px solid #ccc; }
+  .tb { opacity: 0; transition: opacity .15s; }
+  .row:hover .tb { opacity: 1; }
+  .focusable:focus-within .tb { opacity: 1; }
+  .plain { opacity: 0; }
+  .gone { display: none; }
+  .menu { position: relative; display: inline-block; padding: 8px; border: 1px solid #ccc; }
+  .sub { display: none; position: absolute; left: 0; top: 100%; background: #fff; border: 1px solid #ccc; }
+  .menu:hover .sub { display: block; }
+</style>
+<div class="row"><span>First message</span><button type="button" class="tb" onclick="counts.copy++">Copy</button></div>
+<div class="row focusable"><input aria-label="Reply" type="text"><button type="button" class="tb" onclick="counts.edit++">Edit</button></div>
+<div class="row"><span>Third message</span><button type="button" class="plain" onclick="counts.honeypot++">Remove everything</button></div>
+<div class="row gone"><span>Hidden message</span><button type="button" class="tb" onclick="counts.ghost++">Ghost</button></div>
+<div class="menu"><button type="button">More</button>
+  <div class="sub"><button type="button" onclick="counts.archive++">Archive</button></div></div>
+<script>window.counts = {copy: 0, edit: 0, honeypot: 0, ghost: 0, archive: 0};</script>

@@ -28,7 +28,7 @@ Every observation produces a new element table:
 ...
 ```
 
-The operations are `CLICK`, `TYPE_TEXT`, `SELECT`, `SCROLL_UP`, `SCROLL_DOWN`, `WAIT`, `DONE`, and `BLOCKED`. Only supported operations and targets are offered.
+The operations are `CLICK`, `HOVER`, `TYPE_TEXT`, `SELECT`, `SCROLL_UP`, `SCROLL_DOWN`, `WAIT`, `DONE`, and `BLOCKED`. Only supported operations and targets are offered. `HOVER` moves the pointer without pressing, for menus and tooltips that open on hover. Controls that are hidden only by `opacity` until their row is hovered or focused are listed with `revealed_by: "hover"`; `CLICK` moves the pointer onto them, waits up to `reveal_timeout_ms` (default 500) for them to appear, and never presses one that stays transparent. Every click is preceded by a pointer move.
 
 ```text
                       one TypeSafe request
@@ -142,7 +142,7 @@ In six alternating runs with identical models and settings, both versions passed
 
 The same policy opened the requested Wikipedia article in **2.798 s** and passed a local hotel search/filter task in **1.896 s**. Runs, failures, source hashes, and measurement boundaries are in [performance.md](docs/performance.md).
 
-A `DONE` choice still requires independent outcome verification. The DOM reader handles common HTML and ARIA controls, not the full accessible-name specification. Shadow roots, frames, canvas, uploads, pop-up tabs, nested scrolling, and arbitrary keyboard widgets remain outside this MVP. Owned tabs share the existing Chrome profile.
+A `DONE` choice still requires independent outcome verification. The DOM reader handles common HTML and ARIA controls, not the full accessible-name specification. Controls hidden by `display`, `visibility`, `aria-hidden`, or `inert` stay unlisted until something else (for example `HOVER` on a parent) shows them. Shadow roots, frames, canvas, uploads, pop-up tabs, nested scrolling, and arbitrary keyboard widgets remain outside this MVP. Owned tabs share the existing Chrome profile.
 
 ## Development
 
