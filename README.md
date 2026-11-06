@@ -28,7 +28,7 @@ Every observation produces a new element table:
 ...
 ```
 
-The operations are `CLICK`, `HOVER`, `TYPE_TEXT`, `SELECT`, `SCROLL_UP`, `SCROLL_DOWN`, `WAIT`, `DONE`, and `BLOCKED`. Only supported operations and targets are offered. `HOVER` moves the pointer without pressing, for menus and tooltips that open on hover. Controls that are hidden only by `opacity` until their row is hovered or focused are listed with `revealed_by: "hover"`; `CLICK` moves the pointer onto them, waits up to `reveal_timeout_ms` (default 500) for them to appear, and never presses one that stays transparent. Every click is preceded by a pointer move.
+The operations are `CLICK`, `HOVER`, `TYPE_TEXT`, `SELECT`, `SCROLL_UP`, `SCROLL_DOWN`, `WAIT`, `DONE`, and `BLOCKED`. Only supported operations and targets are offered. `HOVER` moves the pointer without pressing, for menus and tooltips that open on hover; it is offered only for elements that hint at a hover effect (`revealed_by`, `aria-haspopup`, `aria-expanded`, a non-empty `title`, or `aria-describedby`) and is left out entirely when none does. Controls that are hidden only by `opacity` until their row is hovered or focused are listed with `revealed_by: "hover"`; `CLICK` moves the pointer onto them, waits up to `reveal_timeout_ms` (default 500) for them to appear, and never presses one that stays transparent. Every click is preceded by a pointer move, and after the move the target is located, hit-tested and compared with its observed guard again, so a page that reflows or relabels the control on hover is refused instead of pressed. A refused press is recorded in `state["refused"]` (not in the history), shown to the model as a refused recent action, hidden from the next choice while the page is unchanged, and counts toward `stuck_after`. A control is a hover reveal only when one transparent layer (the control or a close ancestor) sits directly under a visible parent, so a closed `opacity: 0` dialog is not listed.
 
 ```text
                       one TypeSafe request
@@ -142,7 +142,7 @@ In six alternating runs with identical models and settings, both versions passed
 
 The same policy opened the requested Wikipedia article in **2.798 s** and passed a local hotel search/filter task in **1.896 s**. Runs, failures, source hashes, and measurement boundaries are in [performance.md](docs/performance.md).
 
-A `DONE` choice still requires independent outcome verification. The DOM reader handles common HTML and ARIA controls, not the full accessible-name specification. Controls hidden by `display`, `visibility`, `aria-hidden`, or `inert` stay unlisted until something else (for example `HOVER` on a parent) shows them. Shadow roots, frames, canvas, uploads, pop-up tabs, nested scrolling, and arbitrary keyboard widgets remain outside this MVP. Owned tabs share the existing Chrome profile.
+A `DONE` choice still requires independent outcome verification. The DOM reader handles common HTML and ARIA controls, not the full accessible-name specification. Controls hidden by `display`, `visibility`, `aria-hidden`, or `inert` stay unlisted until something else (for example `HOVER` on a parent) shows them. A hover menu whose parent carries none of the hover signals above (for example a bare `<div>` with a CSS `:hover` rule) is not offered `HOVER`, so give such a parent `aria-haspopup`. Shadow roots, frames, canvas, uploads, pop-up tabs, nested scrolling, and arbitrary keyboard widgets remain outside this MVP. Owned tabs share the existing Chrome profile.
 
 ## Development
 

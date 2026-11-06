@@ -11,14 +11,16 @@
     e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
   // Hidden only by opacity (CSS visibility, display, aria-hidden and inert still count as hidden).
   const shown = e => !e.closest('[aria-hidden="true"],[inert]') && e.checkVisibility({checkVisibilityCSS:true});
-  // The nearest fully visible ancestor below body: the thing a pointer can be moved onto to reveal e.
+  // The host a pointer can be moved onto to reveal e. Only ONE transparent layer may sit between the control and a
+  // visible host: the control itself or a close ancestor with opacity 0 whose parent passes the full check. A closed
+  // opacity-0 dialog, nav or toast nests its controls under a transparent root and is not a hover reveal.
   const revealHost = e => {
-    for (let p=e.parentElement; p && p!==document.body && p!==document.documentElement; p=p.parentElement) {
-      if (!visible(p)) continue;
-      const r=p.getBoundingClientRect();
-      return r.width>0 && r.height>0 ? p : null;
-    }
-    return null;
+    let layer=e;
+    while (layer && getComputedStyle(layer).opacity!=='0') layer=layer.parentElement;
+    const p=layer?.parentElement;
+    if (!p || p===document.body || p===document.documentElement || !visible(p)) return null;
+    const r=p.getBoundingClientRect();
+    return r.width>0 && r.height>0 ? p : null;
   };
   const name = (e,seen=new Set()) => {
     if (!e || seen.has(e)) return '';
@@ -77,6 +79,10 @@
     const base={node:identity(e),role:rname,label:name(e)||rname,
       rect:{x:r.x,y:r.y,w:r.width,h:r.height}};
     if (reveal) base.revealed_by='hover';
+    // Only these elements are offered the HOVER operation (a revealed control always is).
+    if (e.getAttribute('aria-haspopup') && e.getAttribute('aria-haspopup')!=='false' ||
+        e.hasAttribute('aria-expanded') || e.getAttribute('title')?.trim() || e.hasAttribute('aria-describedby'))
+      base.hover_signal=true;
     const out=reveal ? revealed : actions;
     for (const key of ['checked','selected','expanded']) {
       const value=e.getAttribute('aria-'+key);

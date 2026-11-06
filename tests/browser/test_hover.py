@@ -4,7 +4,7 @@ import pytest
 
 from jev_ultrafast import Agent
 from jev_ultrafast import agent as loop
-from jev_ultrafast.browser import StalePage
+from jev_ultrafast.browser import Refused, StalePage
 
 
 def find(page, label):
@@ -73,6 +73,36 @@ def test_reveal_candidates_never_displace_visible_controls_at_the_cap(open_page)
     assert page["omitted_actions"] == 35  # 285 candidates, 250 kept, all visible ones first
 
 
+def test_a_hover_that_shifts_the_target_refuses_the_press(open_page):
+    browser = open_page("hover.html")  # Hovering the row moves the target away and puts a decoy under the old point.
+    page = browser.observe(screenshot=False)
+    with pytest.raises(Refused):
+        browser.act(find(page, "Shift target"), page)
+    assert counts(browser)["shifted"] == 0 and counts(browser)["decoy"] == 0
+
+
+def test_a_hover_that_swaps_the_label_refuses_the_press(open_page):
+    browser = open_page("hover.html")  # mouseenter relabels the button to "Delete all".
+    page = browser.observe(screenshot=False)
+    with pytest.raises(Refused):
+        browser.act(find(page, "Save draft"), page)
+    assert counts(browser)["swapped"] == 0
+
+
+def test_a_closed_transparent_dialog_lists_none_of_its_buttons(open_page):
+    browser = open_page("hover.html")
+    page = browser.observe(screenshot=False)
+    assert not labels(page) & {"Dialog OK", "Dialog Cancel"}
+    assert {"Copy", "Edit", "Remove everything"} <= labels(page)  # Row toolbars still list theirs.
+
+
+def test_only_elements_with_a_hover_signal_carry_one(open_page):
+    browser = open_page("hover.html")
+    page = browser.observe(screenshot=False)
+    assert find(page, "More").get("hover_signal") is True
+    assert "hover_signal" not in find(page, "Reply") and "hover_signal" not in find(page, "Save draft")
+
+
 @pytest.fixture
 def agent(open_page, fixture_base_url):
     open_page("hover.html")  # Skips (or fails in CI) when no browser is configured.
@@ -89,7 +119,7 @@ def agent(open_page, fixture_base_url):
 
 
 def stub(monkeypatch, plan):
-    def choose(page, goal, history):
+    def choose(page, goal, history, refused=()):
         operation, label = plan[min(len(history), len(plan) - 1)]
         action = find(page, label)
         return {

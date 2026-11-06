@@ -77,8 +77,11 @@ def action_space(actions):
             target = f"{index}:{len(element['options']) + 1}"
             element["options"].append({"index": target, "label": action["label"], "value": action["value"]})
         group[target] = action
-        if kind == "click":
-            # Hover shares CLICK's candidates; the agent runs it as a pointer move without a press.
+        if kind == "click" and (
+            action.get("revealed_by") or action.get("hover_signal") or "expanded" in action
+        ):
+            # Hover shares CLICK's candidates but is offered only where the page hints at a hover effect:
+            # revealed_by, aria-haspopup, aria-expanded, a title or aria-describedby. The agent runs it without a press.
             element = elements[int(index) - 1]
             if "HOVER" not in element["operations"]:
                 element["operations"].append("HOVER")
@@ -86,7 +89,18 @@ def action_space(actions):
     return elements, targets, controls
 
 
-def choose(state, goal, history):
+def recent_actions(history, refused=()):
+    """Executed actions plus refused presses, in order; a refused press never reached history."""
+    events = [(i, 0, h) for i, h in enumerate(history)]
+    events += [(r["after"] - 0.5, 1, {**r, "page_changed": False, "text": None, "action": r["label"]}) for r in refused]
+    events.sort(key=lambda e: (e[0], e[1]))
+    return [
+        {**{k: h.get(k) for k in ("action", "kind", "text", "page_changed")}, **({"refused": True} if r else {})}
+        for _, r, h in events[-10:]
+    ]
+
+
+def choose(state, goal, history, refused=()):
     elements, targets, controls = action_space(state["actions"])
     labels = {
         "CLICK": "Click an element, button, menu option, autocomplete suggestion, or calendar day.",
@@ -118,9 +132,7 @@ def choose(state, goal, history):
         "state": {
             "page": {k: state[k] for k in ("url", "title", "text")},
             "elements": elements,
-            "recent_actions": [
-                {k: h.get(k) for k in ("action", "kind", "text", "page_changed")} for h in history[-10:]
-            ],
+            "recent_actions": recent_actions(history, refused),
         },
         "questions": questions,
     }
