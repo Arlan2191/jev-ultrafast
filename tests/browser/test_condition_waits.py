@@ -73,8 +73,9 @@ def test_text_stable_on_the_streaming_element(start):
     started = begin_stream(agent.browser)
     # An element that has not started to fill is stable too, so wait for the first text first.
     assert agent.wait_for("text", "chunk 1", timeout_ms=5000).met is True
-    result = agent.wait_for("text_stable", quiet_ms=300, role="textbox", name="Answer")
-    assert result.met is True and 2500 + 300 <= elapsed_ms(started) <= 3000 + 300 + 1500
+    # Chunks arrive 500 ms apart, so only a quiet period longer than that waits for the last one (at 2.5 s).
+    result = agent.wait_for("text_stable", quiet_ms=800, role="textbox", name="Answer")
+    assert result.met is True and 2500 + 800 <= elapsed_ms(started) <= 2500 + 800 + 1500
     assert "chunk 6" in agent.browser.evaluate("document.getElementById('out').textContent")
 
 
