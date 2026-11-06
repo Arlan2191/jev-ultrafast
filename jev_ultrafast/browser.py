@@ -91,6 +91,7 @@ class Browser:
         wait_timeout_ms=30000,
         action_settle_timeout_ms=5000,
         action_settle_quiet_ms=150,
+        new_window=True,
     ):
         self.wait_quiet_ms = wait_quiet_ms
         self.wait_timeout_ms = wait_timeout_ms
@@ -105,7 +106,11 @@ class Browser:
         self.reveal_timeout_ms = reveal_timeout_ms
         self.autocomplete_settle_ms = autocomplete_settle_ms
         ensure_daemon()
-        self.target = cdp("Target.createTarget", url="about:blank", background=True)["targetId"]
+        # An owned tab in the user's window is a background tab: after a few clicks Chrome throttles its frames to
+        # about 1 Hz, and every pointer move then waits ~1 s for the next frame. A window of its own stays at full rate.
+        self.target = cdp(
+            "Target.createTarget", url="about:blank", background=True, newWindow=bool(new_window)
+        )["targetId"]
         self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
         self.call("Emulation.setDeviceMetricsOverride", width=1120, height=780, deviceScaleFactor=1, mobile=False)
         # Keep rAF/menus rendering in an owned background tab, without activating the user's Chrome tab.

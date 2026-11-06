@@ -9,6 +9,8 @@ import os
 import statistics
 import time
 
+import pytest
+
 from jev_ultrafast import Agent
 from jev_ultrafast import agent as loop
 from jev_ultrafast import browser as browser_module
@@ -62,7 +64,8 @@ def stub_click(monkeypatch):
     monkeypatch.setattr(loop, "choose", choose)
 
 
-def test_one_click_tick_breakdown(open_page, fixture_base_url, monkeypatch):
+@pytest.mark.parametrize("new_window", [False, True])
+def test_one_click_tick_breakdown(open_page, fixture_base_url, monkeypatch, new_window):
     open_page("tick_button.html")  # Skips (or fails in CI) when no browser is configured.
     stub_click(monkeypatch)
     recorder = Recorder()
@@ -88,7 +91,9 @@ def test_one_click_tick_breakdown(open_page, fixture_base_url, monkeypatch):
 
     monkeypatch.setattr(browser_module, "browser_operation", timed_operation)
 
-    agent = Agent(f"{fixture_base_url}/tick_button.html", "Press the button", stuck_after=99, max_steps=20)
+    agent = Agent(
+        f"{fixture_base_url}/tick_button.html", "Press the button", stuck_after=99, max_steps=20, new_window=new_window
+    )
     try:
         # Floor: one trivial Runtime.evaluate round trip through browser-harness (new IPC connection per call).
         floor = []
@@ -99,7 +104,7 @@ def test_one_click_tick_breakdown(open_page, fixture_base_url, monkeypatch):
         recorder.calls.clear()
         recorder.phases.clear()
         ticks = []
-        for _ in range(6):
+        for _ in range(12):
             start = time.perf_counter()
             agent.command("tick")
             ticks.append((time.perf_counter() - start) * 1000)
@@ -108,18 +113,18 @@ def test_one_click_tick_breakdown(open_page, fixture_base_url, monkeypatch):
         agent.close()
 
     lines = [
-        "### Click tick breakdown (stubbed model, headless Chrome)",
+        f"### Click tick breakdown (stubbed model, headless Chrome, new_window={new_window})",
         f"- Runtime.evaluate('1') round trip: median {statistics.median(floor):.1f} ms, max {max(floor):.1f} ms",
-        f"- tick ms (6 ticks): {', '.join(f'{t:.0f}' for t in ticks)}; median {statistics.median(ticks):.0f}",
+        f"- tick ms (12 ticks): {', '.join(f'{t:.0f}' for t in ticks)}; median {statistics.median(ticks):.0f}",
         "",
-        "Per phase, summed over 6 ticks (ms):",
+        "Per phase, summed over 12 ticks (ms):",
     ]
     totals = {}
     for entry in recorder.phases:
         totals[entry["name"]] = totals.get(entry["name"], 0) + entry["ms"]
-    lines += [f"- {name}: {ms / 6:.1f} per tick" for name, ms in sorted(totals.items(), key=lambda x: -x[1])]
+    lines += [f"- {name}: {ms / 12:.1f} per tick" for name, ms in sorted(totals.items(), key=lambda x: -x[1])]
     lines += ["", "CDP calls of the last tick (phase | method | expression | ms):"]
-    per_tick = len(last_calls) // 6
+    per_tick = len(last_calls) // 12
     lines += [f"- {p} | {m} | {e} | {ms:.1f}" for p, m, e, ms in last_calls[-per_tick:]]
     report = "\n".join(lines)
     print(report)

@@ -77,6 +77,7 @@ class Agent:
         wait_quiet_ms=500,
         wait_timeout_ms=30000,
         action_settle_timeout_ms=5000,
+        new_window=True,
     ):
         task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
         if not task:
@@ -109,6 +110,7 @@ class Agent:
             wait_quiet_ms=wait_quiet_ms,
             wait_timeout_ms=wait_timeout_ms,
             action_settle_timeout_ms=action_settle_timeout_ms,
+            new_window=new_window,
         )
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
