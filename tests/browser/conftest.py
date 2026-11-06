@@ -26,10 +26,29 @@ def pytest_collection_modifyitems(items):
 
 
 @pytest.fixture(scope="session")
-def fixture_base_url():
+def fixture_server():
+    """The local fixture server and what it saw: {"sent": {id: bytes}, "closed": {id: time the client left}}."""
+    observed = {"sent": {}, "closed": {}}
+
     class Handler(http.server.SimpleHTTPRequestHandler):
         def log_message(self, *args, **kwargs):
             pass
+
+        def endless(self, ident, chunk, pause, count):
+            """Send `count` chunks of `chunk` bytes, `pause` apart; record the bytes sent and when the client left."""
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            observed["sent"][ident] = 0
+            try:
+                for _ in range(count):
+                    self.wfile.write(b"x" * chunk)
+                    self.wfile.flush()
+                    observed["sent"][ident] += chunk
+                    time.sleep(pause)
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                observed["closed"][ident] = time.monotonic()
 
         def stream(self, chunks, pause, content_type="text/plain"):
             self.send_response(200)
@@ -54,6 +73,20 @@ def fixture_base_url():
                 return self.stream((f"data: tick {i}\n\n" for i in range(100)), 0.2, "text/event-stream")
             if route == "/hang":
                 return self.stream([" "], 20)
+            query = dict(part.split("=", 1) for part in self.path.partition("?")[2].split("&") if "=" in part)
+            # /endless?id=<id>: 1 KB every 50 ms for 20 s. /big?id=<id>: 256 KB chunks as fast as the client reads,
+            # up to 256 MB. Both record bytes sent and when the client went away.
+            if route == "/endless":
+                return self.endless(query.get("id", "endless"), 1024, 0.05, 400)
+            if route == "/big":
+                return self.endless(query.get("id", "big"), 256 * 1024, 0, 1024)
+            if route == "/json":
+                return self.stream(['{"a": 1}'], 0, "application/json")
+            if route == "/redirect":
+                self.send_response(302)
+                self.send_header("Location", "/api/0")
+                self.end_headers()
+                return None
             api = re.match(r"/api/(\d+)", self.path)
             if api:
                 time.sleep(int(api[1]) / 1000)
@@ -69,9 +102,19 @@ def fixture_base_url():
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    yield f"http://127.0.0.1:{server.server_address[1]}"
+    yield f"http://127.0.0.1:{server.server_address[1]}", observed
     server.shutdown()
     server.server_close()
+
+
+@pytest.fixture(scope="session")
+def fixture_base_url(fixture_server):
+    return fixture_server[0]
+
+
+@pytest.fixture(scope="session")
+def server_observed(fixture_server):
+    return fixture_server[1]
 
 
 @pytest.fixture

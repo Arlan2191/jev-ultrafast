@@ -10,7 +10,7 @@ from test_agent import decision, page
 from jev_ultrafast import Agent
 from jev_ultrafast import agent as loop
 from jev_ultrafast import browser as browser_module
-from jev_ultrafast.browser import Browser
+from jev_ultrafast.browser import Browser, fingerprint
 from jev_ultrafast.waits import (
     WaitResult,
     element_state,
@@ -331,3 +331,45 @@ def test_the_wait_instruction_says_wait_settles_the_page():
     from jev_ultrafast.questions import NEXT_ACTION
 
     assert "streaming" in NEXT_ACTION and "until the page is settled" in NEXT_ACTION
+
+
+# B1: a timed-out WAIT on an unchanged page is a stuck step.
+
+
+def timed_out_wait(runner, observed=None):
+    runner.state["browser"].act.return_value = {
+        "executed": "wait",
+        "wait": {"met": False, "waited_ms": 30000, "reason": "timeout: the DOM is still changing"},
+    }
+    if observed is not None:
+        runner.state["browser"].observe.return_value = observed
+    runner.state["decision"] = {**decision("wait"), "operation": "WAIT"}
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+
+
+def test_three_timed_out_waits_on_an_unchanged_page_end_the_run_blocked(runner):
+    for _ in range(3):
+        timed_out_wait(runner)
+    assert runner.state["status"] == "blocked"
+
+
+def test_a_timed_out_wait_during_which_the_content_changed_does_not_count(runner):
+    timed_out_wait(runner)
+    timed_out_wait(runner)
+    streaming = page()
+    streaming["text"] = "A stream longer than the timeout"
+    streaming["fingerprint"] = fingerprint(streaming)
+    timed_out_wait(runner, streaming)
+    assert runner.state["history"][-1]["content_changed"] is True
+    assert runner.state["status"] == "ready"
+
+
+def test_a_met_wait_on_an_unchanged_page_does_not_count(runner):
+    runner.state["browser"].act.return_value = {
+        "executed": "wait",
+        "wait": {"met": True, "waited_ms": 600, "reason": "settled"},
+    }
+    for _ in range(4):
+        runner.state["decision"] = {**decision("wait"), "operation": "WAIT"}
+        runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert runner.state["status"] == "ready"
