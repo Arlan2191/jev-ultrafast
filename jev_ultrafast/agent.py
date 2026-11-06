@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from .browser import Browser, Refused, StalePage
+from .keys import validate_keys, validate_urls
 from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS
 
@@ -43,6 +44,11 @@ class Agent:
     copies, so changing them cannot change what executes. It can run more than once for one intended action if the
     page goes stale first, so keep it free of side effects or make it idempotent. Raise ActionDenied(reason) to
     veto: a veto always prevents execution and the run ends as "denied".
+    keys: extra shortcut chords the caller declares, e.g. ("Control+K",); the fixed keys (Enter, Escape, Tab, ...) are
+    always offered. urls: {name: absolute http(s) URL} pages the model may GOTO; it never writes a URL.
+    navigation_timeout_ms bounds the wait for a new document after BACK, RELOAD or GOTO (the page is observed anyway).
+    Key presses and navigation are browser mutations: they are logged, never retried, and go through before_action
+    with kind "key" (action["key"], action["focused"]), "back", "reload" or "goto" (action["url"]).
     """
 
     def __init__(
@@ -59,6 +65,9 @@ class Agent:
         reveal_timeout_ms=500,
         stuck_after=3,
         before_action=None,
+        keys=(),
+        urls=None,
+        navigation_timeout_ms=15000,
     ):
         task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
         if not task:
@@ -69,6 +78,9 @@ class Agent:
         positive_int("settle_ms", settle_ms, minimum=0)
         positive_int("autocomplete_settle_ms", autocomplete_settle_ms, minimum=0)
         positive_int("reveal_timeout_ms", reveal_timeout_ms, minimum=0)
+        positive_int("navigation_timeout_ms", navigation_timeout_ms)
+        keys = validate_keys(keys)
+        urls = validate_urls(urls)
         if before_action is not None and not callable(before_action):
             raise ValueError("before_action must be callable")
         self.before_action = before_action
@@ -79,6 +91,9 @@ class Agent:
             settle_ms=settle_ms,
             autocomplete_settle_ms=autocomplete_settle_ms,
             reveal_timeout_ms=reveal_timeout_ms,
+            keys=keys,
+            urls=urls,
+            navigation_timeout_ms=navigation_timeout_ms,
         )
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
@@ -177,6 +192,10 @@ class Agent:
             action = next(a for a in page["actions"] if a["id"] == selected)
             if decision["operation"] == "HOVER":
                 action = {**action, "kind": "hover"}
+            if action["kind"] == "key":
+                # Lets a policy refuse a key by what has focus, e.g. Enter on a focused Delete button.
+                focus = page.get("focus") or {}
+                action = {**action, "focused": {k: focus.get(k) for k in ("role", "label", "href")} if focus else None}
             if len(state["history"]) >= self.max_steps:
                 return self.stop("budget", "max_steps")
             text, helper = None, None
@@ -210,6 +229,7 @@ class Agent:
             except Refused as refusal:
                 # The pointer moved but nothing was pressed: not history, but the model and stuck_after must see it.
                 refused = state.setdefault("refused", [])
+                del refused[:-49]
                 refused.append(
                     {
                         "label": action["label"],

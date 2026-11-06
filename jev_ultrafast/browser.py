@@ -9,6 +9,8 @@ from pathlib import Path
 from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import cdp
 
+from .keys import key_events, offered_keys
+
 # Atomically read visible content and controls, preserving actual DOM node identity.
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
@@ -21,8 +23,37 @@ class Refused(StalePage):
     """The pointer already moved onto the target, then the press was refused. Nothing was pressed."""
 
 
+NAVIGATION = {"back", "reload", "goto"}
+
+
+def control_actions(info, keys, urls):
+    """Target-less and caller-declared controls. Keys and URLs come from the caller, never from the model."""
+    extra = [{"id": f"key:{k}", "kind": "key", "key": k, "name": k, "label": f"Press {k}"} for k in keys]
+    if info.get("history_length", 0) > 1:
+        extra.append({"id": "back", "kind": "back", "label": "Go back to the previous page"})
+    extra.append({"id": "reload", "kind": "reload", "label": "Reload the current page"})
+    extra += [
+        {"id": f"goto:{name}", "kind": "goto", "name": name, "url": url, "label": f"Open {name}"}
+        for name, url in urls.items()
+    ]
+    return extra
+
+
 class Browser:
-    def __init__(self, url, *, settle_ms=50, autocomplete_settle_ms=200, reveal_timeout_ms=500):
+    def __init__(
+        self,
+        url,
+        *,
+        settle_ms=50,
+        autocomplete_settle_ms=200,
+        reveal_timeout_ms=500,
+        keys=(),
+        urls=None,
+        navigation_timeout_ms=15000,
+    ):
+        self.keys = offered_keys(keys)
+        self.urls = dict(urls or {})
+        self.navigation_timeout_ms = navigation_timeout_ms
         self.settle_ms = settle_ms
         self.reveal_timeout_ms = reveal_timeout_ms
         self.autocomplete_settle_ms = autocomplete_settle_ms
@@ -84,7 +115,13 @@ class Browser:
         for attempt in range(10):
             try:
                 return browser_operation(
-                    {"operation": "observe", "session": self.session, "screenshot": screenshot}
+                    {
+                        "operation": "observe",
+                        "session": self.session,
+                        "screenshot": screenshot,
+                        "keys": getattr(self, "keys", ()),
+                        "urls": getattr(self, "urls", {}),
+                    }
                 )
             except StalePage:
                 if attempt == 9:
@@ -93,6 +130,13 @@ class Browser:
         raise StalePage("Page did not settle")
 
     def fresh(self, page, action=None):
+        if action is not None and action["kind"] == "key":
+            # The key goes to whatever has focus: the same document, and the same focused element in the same state.
+            focus = page.get("focus")
+            current = self.evaluate(
+                "(() => { const c=window.__jevFast; return c ? [c.pageKey(),c.focused()?.guard ?? null] : null; })()"
+            )
+            return current == [page["page_key"], focus["guard"] if focus else None]
         if action is not None and action["kind"] in {"click", "select", "hover"}:
             node = action["node"]
             if type(node) is not int:
@@ -109,6 +153,15 @@ class Browser:
             raise StalePage("Page changed since this decision. Observe again.")
         if action["kind"] == "wait":
             time.sleep(0.1)
+        if action["kind"] in NAVIGATION:
+            self.navigate(action)
+            self.after_input = action
+            return {"executed": action["id"]}
+        if action["kind"] == "key":
+            for event in key_events(action["key"]):
+                self.call("Input.dispatchKeyEvent", **event)
+            self.after_input = action
+            return {"executed": action["id"]}
         if "node" in action:
             # The press-time check compares this guard again after the pointer has moved.
             action = {**action, "guard": page.get("guards", {}).get(str(action["node"]))}
@@ -124,6 +177,30 @@ class Browser:
         self.after_input = action if action["kind"] != "wait" else None
         return result
 
+    def navigate(self, action):
+        """back, reload or goto, then wait (bounded) for a new document. A slow page is observed anyway."""
+        before = self.evaluate("[performance.timeOrigin, location.href]")
+        kind = action["kind"]
+        if kind == "back":
+            history = self.call("Page.getNavigationHistory")
+            index = history["currentIndex"] - 1
+            if index < 0:
+                raise StalePage("There is no previous page. Observe again.")
+            self.call("Page.navigateToHistoryEntry", entryId=history["entries"][index]["id"])
+        elif kind == "reload":
+            self.call("Page.reload")
+        else:
+            self.call("Page.navigate", url=action["url"])
+        deadline = time.monotonic() + self.navigation_timeout_ms / 1000
+        while time.monotonic() < deadline:
+            try:
+                now = self.evaluate("[performance.timeOrigin, location.href, document.readyState]")
+            except (StalePage, RuntimeError):
+                now = None  # The old context is going away.
+            if now and now[2] == "complete" and now[:2] != before:
+                return
+            time.sleep(0.02)
+
     def close(self):
         if self.target:
             cdp("Target.closeTarget", targetId=self.target)
@@ -131,7 +208,7 @@ class Browser:
 
 
 def fingerprint(state):
-    content = {k: state[k] for k in ("url", "text", "actions", "scroll")}
+    content = {k: state[k] for k in ("url", "text", "actions", "scroll")} | {"focus": state.get("focus")}
     return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
 
 
@@ -254,6 +331,7 @@ def browser_operation(request):
     info = evaluate(READ_STATE)
     if info is None:
         raise StalePage("Document is navigating")
+    info["actions"] += control_actions(info, request.get("keys", ()), request.get("urls", {}))
     info["fingerprint"] = fingerprint(info)
     if request.get("screenshot", True):
         info["screenshot"] = call("Page.captureScreenshot", format="jpeg", quality=72)["data"]

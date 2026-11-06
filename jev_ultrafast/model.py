@@ -51,6 +51,10 @@ def action_space(actions):
     operations = {"click": "CLICK", "fill": "TYPE_TEXT", "select": "SELECT"}
     for action in actions:
         kind = action["kind"]
+        if kind in {"key", "goto"}:
+            # Caller-declared choices, addressed by name; they refer to no observed element.
+            targets.setdefault("PRESS_KEY" if kind == "key" else "GOTO", {})[action["name"]] = action
+            continue
         if kind not in operations:
             controls[action["id"].upper()] = action
             continue
@@ -59,7 +63,9 @@ def action_space(actions):
             index = str(len(elements) + 1)
             indices[node] = index
             element = {
-                k: action[k] for k in ("role", "value", "checked", "selected", "expanded", "revealed_by") if k in action
+                k: action[k]
+                for k in ("role", "value", "checked", "selected", "expanded", "revealed_by", "focused")
+                if k in action
             }
             element.update(index=index, label=action["label"].split(" → ")[0], operations=[])
             if kind == "select":
@@ -107,6 +113,8 @@ def choose(state, goal, history, refused=()):
         "TYPE_TEXT": "Enter or replace text in an editable field. A small LLM will supply the value from the goal.",
         "SELECT": "Select an observed dropdown value.",
         "HOVER": "Move the pointer over an element without pressing, to open a hover menu or tooltip.",
+        "PRESS_KEY": "Press a key or shortcut. It goes to the focused element (marked focused), or to the page.",
+        "GOTO": "Open one of the declared pages.",
     }
     operations = {key: labels[key] for key in targets}
     operations.update({key: value["label"] for key, value in controls.items()})
@@ -118,11 +126,21 @@ def choose(state, goal, history, refused=()):
         questions[operation.lower() + "_target"] = {
             "type": "choice",
             "criteria": {
-                index: {
-                    "element": f"[{index}] {a['label']}",
-                    "current_value": a.get("current_value", a.get("value", "")),
-                    **{k: a[k] for k in ("role", "checked", "selected", "expanded", "revealed_by") if k in a},
-                }
+                index: (
+                    {"key": a["name"]}
+                    if operation == "PRESS_KEY"
+                    else {"page": a["name"]}
+                    if operation == "GOTO"
+                    else {
+                        "element": f"[{index}] {a['label']}",
+                        "current_value": a.get("current_value", a.get("value", "")),
+                        **{
+                            k: a[k]
+                            for k in ("role", "checked", "selected", "expanded", "revealed_by", "focused")
+                            if k in a
+                        },
+                    }
+                )
                 for index, a in candidates.items()
             },
             "instructions": {"goal": goal, "operation": operation, "rules": [NEXT_ACTION, TARGET]},

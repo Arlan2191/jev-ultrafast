@@ -13,6 +13,10 @@ Recent WAIT actions are not evidence of loading. Prefer a useful visible control
 Elements marked revealed_by "hover" are shown only while the pointer is over their row. CLICK on them is
 correct, because the executor moves the pointer first. HOVER is for a menu or tooltip that opens on hover
 and is not listed yet. Recent actions marked refused were not pressed; do not repeat them.
+PRESS_KEY sends a key to the element marked focused, or to the page. Press Enter to submit a focused field when no
+submit control is visible or the goal says so. Press Escape to dismiss a dialog or menu. Use Tab or an arrow key only
+to move focus or choose within a list. Use a declared shortcut only when the goal or the page calls for it.
+GOTO opens only a declared page. Do not use RELOAD or BACK to retry without a reason.
 DONE requires visible evidence that ALL requirements are satisfied. If asked to open a result,
 a matching link is not enough. BLOCKED means no supported operation can make progress."""
 
