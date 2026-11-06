@@ -150,13 +150,13 @@ class Agent:
 
     WAITS = ("dom_quiet", "network_idle", "settled", "element", "text", "text_stable")
 
-    def wait_for(self, kind, **kwargs):
+    def wait_for(self, kind, *args, **kwargs):
         """Run one condition wait in code, with no model call: dom_quiet, network_idle, settled, element, text or
         text_stable (arguments as on Browser, each with timeout_ms). Returns a WaitResult(met, waited_ms, reason)
         and never raises on timeout. The result is also appended to state["waits"] (the last 100)."""
         if kind not in self.WAITS:
             raise ValueError(f"Unknown wait {kind!r}; use one of {', '.join(self.WAITS)}")
-        result = getattr(self.browser, kind)(**kwargs)
+        result = getattr(self.browser, kind)(*args, **kwargs)
         self.browser.mark_activity()
         waits = self.state.setdefault("waits", [])
         waits.append({"kind": kind, **result.as_dict()})

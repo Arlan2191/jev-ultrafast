@@ -31,7 +31,32 @@ def fixture_base_url():
         def log_message(self, *args, **kwargs):
             pass
 
+        def stream(self, chunks, pause, content_type="text/plain"):
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                for chunk in chunks:
+                    self.wfile.write(chunk.encode())
+                    self.wfile.flush()
+                    time.sleep(pause)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
         def do_GET(self):
+            # /stream: six chunks, half a second apart. /events: a server-sent event every 200 ms, until the client
+            # leaves. /api/<ms>: a short answer after <ms>. /hang: a long poll that stays open for 20 s.
+            if self.path.startswith("/stream"):
+                return self.stream([f"chunk {i} " for i in range(1, 7)], 0.5)
+            if self.path.startswith("/events"):
+                return self.stream((f"data: tick {i}\n\n" for i in range(100)), 0.2, "text/event-stream")
+            if self.path.startswith("/hang"):
+                return self.stream([" "], 20)
+            api = re.match(r"/api/(\d+)", self.path)
+            if api:
+                time.sleep(int(api[1]) / 1000)
+                return self.stream(["ok"], 0)
             # /delay/<ms>/<path> answers <path> after <ms>: a form or link whose server is slow.
             match = re.match(r"/delay/(\d+)(/.*)", self.path)
             if match:

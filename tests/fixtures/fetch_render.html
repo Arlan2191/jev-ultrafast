@@ -1,0 +1,9 @@
+<!doctype html><title>Fetch</title>
+<button type="button" id="load">Load report</button>
+<div id="result"></div>
+<script>
+  document.getElementById('load').onclick = async () => {
+    const response = await fetch('/api/800');
+    document.getElementById('result').textContent = 'Report ready: ' + await response.text();
+  };
+</script>

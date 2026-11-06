@@ -1,0 +1,8 @@
+<!doctype html><title>Events</title>
+<h1>Live</h1>
+<div id="log" aria-hidden="true"></div>
+<button type="button" id="poll">Poll</button>
+<script>
+  new EventSource('/events').onmessage = event => { document.getElementById('log').textContent = event.data; };
+  document.getElementById('poll').onclick = () => fetch('/hang');
+</script>

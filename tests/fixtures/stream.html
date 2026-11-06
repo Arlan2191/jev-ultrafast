@@ -1,0 +1,22 @@
+<!doctype html><title>Stream</title>
+<h1>Assistant</h1>
+<div role="textbox" aria-label="Answer" aria-readonly="true" tabindex="0" id="out"></div>
+<button type="button" id="spinner" hidden>Stop generating</button>
+<div id="tools"></div>
+<script>
+  async function start() {
+    const out = document.getElementById('out'), spinner = document.getElementById('spinner');
+    spinner.hidden = false;
+    const response = await fetch('/stream');
+    const reader = response.body.getReader(), decoder = new TextDecoder();
+    for (;;) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      out.append(decoder.decode(value));
+    }
+    spinner.hidden = true;
+    const copy = document.createElement('button');
+    copy.textContent = 'Copy';
+    document.getElementById('tools').append(copy);
+  }
+</script>
