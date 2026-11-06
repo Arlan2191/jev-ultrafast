@@ -257,13 +257,13 @@ def test_done_is_accepted_when_every_check_is_met_and_the_run_is_verified(monkey
     timeouts = [
         c.args[1] if len(c.args) > 1 else c.kwargs["timeout_ms"] for c in agent.fake.browser.probe.call_args_list
     ]
-    assert timeouts == [1234, 1234]
+    assert timeouts == [1234, 1234, 0, 0]  # the DONE read, then the stable pass: every check once more, no waiting
 
 
 def test_a_per_expectation_timeout_overrides_the_agent_default(monkeypatch):
     agent = make(monkeypatch, [Step("press", expect=[expect.text("ok", timeout_ms=77)])], expect_timeout_ms=1234)
     do(agent)
-    call = agent.fake.browser.probe.call_args
+    call = agent.fake.browser.probe.call_args_list[0]
     assert (call.args[1] if len(call.args) > 1 else call.kwargs["timeout_ms"]) == 77
 
 
@@ -775,7 +775,7 @@ def test_goals_and_descriptions_are_scrubbed_wherever_they_are_sent_anyway(monke
     seen = []
     monkeypatch.setattr(loop, "choose", lambda p, g, h, **extra: seen.append(json.dumps([g, extra])) or decision())
     agent.command("predict")
-    assert SECRET not in seen[0] and "<secret:password>" in seen[0]
+    assert SECRET not in seen[0] and "<secret:pw>" in seen[0]
 
 
 # --- review round 1: stable completion (S1) ---------------------------------------------------------------------

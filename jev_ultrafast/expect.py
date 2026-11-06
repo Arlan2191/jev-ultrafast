@@ -7,8 +7,13 @@
 Each constructor returns an Expectation with a human description (shown to the model and recorded). The agent
 evaluates it through the condition waits with a bounded timeout, so a check can wait for a UI that updates late. A
 check never raises on timeout; a caller callable that raises is recorded as unmet with its message.
+
+Two limits to know before relying on a check. A negative check (`no_text`, `no_element`) holds on a blank or unrelated
+page and on a dialog that never opened, so pair it with a positive one. Checks read the whole page, not the element
+an action touched: a step whose action navigates away is checked against whatever page is open then (add `url`).
 """
 
+import inspect
 import re
 import time
 from dataclasses import dataclass, field
@@ -26,6 +31,36 @@ def timeout_of(timeout_ms):
     return None if timeout_ms is None else non_negative("timeout_ms", timeout_ms)
 
 
+class Facade:
+    """What a check callable receives instead of the Browser: it can read the page and nothing else. `evaluate` runs
+    the JavaScript you give it, so keep that read-only too; this keeps a callable from clicking, typing, navigating
+    or closing the tab, and does not sandbox JavaScript."""
+
+    def __init__(self, browser):
+        self._browser = browser
+
+    def unwrap(self):
+        return self._browser
+
+    def evaluate(self, expression):
+        return self._browser.evaluate(expression)
+
+    def url(self):
+        return self._browser.evaluate("location.href")
+
+    def probe(self, kind, timeout_ms=0, **args):
+        """A WaitResult for an "element" or "text" condition, read once (timeout_ms=0) or waited for."""
+        return self._browser.probe(kind, timeout_ms, **args)
+
+    def element(self, role=None, name=None, state=None, present=True):
+        """True when an element with this role, name and state is visible now (False with present=False)."""
+        return self.probe("element", role=role, name=name, state=state, present=present).met is True
+
+    def text(self, contains, present=True):
+        """True when the visible text contains the string or regex now (False with present=False)."""
+        return self.probe("text", contains=contains, present=present).met is True
+
+
 @dataclass(frozen=True)
 class Expectation:
     kind: str
@@ -33,6 +68,12 @@ class Expectation:
     timeout_ms: int | None = None
     args: dict = field(default_factory=dict)
     fn: object = None
+    auto: bool = False
+
+    @property
+    def cheap(self):
+        """Safe to read after every action: everything but a caller callable that did not opt in (auto=True)."""
+        return self.kind != "check" or self.auto
 
     def evaluate(self, browser, timeout_ms):
         """A WaitResult, waiting at most timeout_ms (0 checks once). The caller picks it: see `timeout_for`."""
@@ -59,11 +100,22 @@ class Expectation:
                 spec = self.args["match"]
                 found = bool(spec.search(href)) if isinstance(spec, re.Pattern) else spec in href
                 return found, f"url is {href}"
-            outcome = self.fn(browser)
+            outcome = self.fn(Facade(browser))
+            if inspect.iscoroutine(outcome):
+                outcome.close()  # Never awaited: say so instead of leaving the warning.
+                return False, "the check returned a coroutine; check callables must be plain functions, not async"
         except Exception as error:
             return False, f"{type(error).__name__}: {error}"
         met, reason = outcome if isinstance(outcome, tuple) and len(outcome) == 2 else (outcome, None)
-        return met is True, reason or ("met" if met is True else "returned a falsy value")
+        if reason is not None:
+            reason = str(reason)
+        if met is True:
+            return True, reason or "met"
+        if reason:
+            return False, reason
+        if met is False:
+            return False, "returned a falsy value"
+        return False, f"returned {met!r}, a non-bool value (a check must return True or False)"
 
 
 def contains(name, value):
@@ -126,11 +178,21 @@ def url(match, *, timeout_ms=None):
     return Expectation("url", f"url {kind} {describe(match)}", timeout_of(timeout_ms), {"match": match})
 
 
-def check(fn, description, *, timeout_ms=None):
-    """A caller callable fn(browser) -> bool or (bool, reason). It is polled until it holds or the timeout passes; one
-    that raises is unmet with the exception as the reason, and the exception is not propagated."""
+def check(fn, description, auto=False, *, timeout_ms=None):
+    """A caller callable fn(page) -> bool or (bool, reason), where page is a read-only Facade (evaluate, url, probe,
+    element, text). It is polled every 50 ms until it holds or the timeout passes, and a callable that raises is
+    unmet with the exception as the reason (the exception is not propagated). It must be read-only, idempotent and
+    fast: it is never interrupted, it runs dozens of times per DONE, and it must not mutate the page.
+
+    A DONE on the step runs it up to expect_timeout_ms (or timeout_ms) plus one more read after the settle. It is left
+    out of the cheap read after every action unless auto=True, and a step with a callable that did not opt in never
+    completes without a DONE decision. With auto=True it runs once after every executed action."""
     if not callable(fn):
         raise ValueError("check needs a callable")
+    if inspect.iscoroutinefunction(fn):
+        raise ValueError("check callables must be plain functions, not async")
     if not isinstance(description, str) or not description.strip():
         raise ValueError("check needs a description")
-    return Expectation("check", description.strip(), timeout_of(timeout_ms), {}, fn)
+    if type(auto) is not bool:
+        raise ValueError("auto must be True or False")
+    return Expectation("check", description.strip(), timeout_of(timeout_ms), {}, fn, auto)

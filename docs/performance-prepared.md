@@ -14,7 +14,7 @@
 
 The clock starts with the first prediction, after the initial Google Flights homepage observation. It ends at the final DONE choice. It includes model calls, browser execution, observation, screenshots, asynchronous Google loading, and decisions discarded when the page changes. Browser launch, initial navigation, and setup are outside that clock. The video adds a 750 ms opening hold and a 2-second final hold; the timed run is uncut and unaccelerated.
 
-The agent starts at the generic Google Flights homepage, with no route/date query prefilled by code. Jev selects every target. Five explicit ordered goals specify the trip; this is not autonomous trip planning. Zurich and London are copied from quoted goal values, so these timings do not include the optional text model. The optional GLM helper was separately exercised on the local fixture.
+The agent starts at the generic Google Flights homepage, with no route/date query prefilled by code. Jev selects every target. Five explicit ordered goals specify the trip (measured as one joined goal, which `"\n".join(goals)` still reproduces; a list of goals is now one step per goal, with one more DONE decision per step and later goals hidden from the model, so these numbers were not re-measured for that form); this is not autonomous trip planning. Zurich and London are copied from quoted goal values, so these timings do not include the optional text model. The optional GLM helper was separately exercised on the local fixture.
 
 ## What was checked
 

@@ -6,7 +6,7 @@ The current video completes the Google Flights task in **7.073 seconds at 1×**.
 
 ## Matched runtime comparison
 
-Six alternating runs, one task, one existing Chrome profile. Both arms used the same natural-language goal, independent result checker, 1120×780 viewport, TypeSafe `jev-1.13.0`, `inception/mercury-2.5`, disabled text reasoning, and action/request budgets. Initial navigation is excluded in both arms. Each run creates and closes its own tab. All six attempts are included; no provider or verification failures occurred.
+Six alternating runs, one task, one existing Chrome profile. Both arms used the same natural-language goal (measured when a list of goals was joined into one; pass `"\n".join(goals)` to reproduce that form, since a list is now one step per string; not re-measured), independent result checker, 1120×780 viewport, TypeSafe `jev-1.13.0`, `inception/mercury-2.5`, disabled text reasoning, and action/request budgets. Initial navigation is excluded in both arms. Each run creates and closes its own tab. All six attempts are included; no provider or verification failures occurred.
 
 | Pair | Original runtime | Optimized runtime | Verified |
 | --- | ---: | ---: | --- |

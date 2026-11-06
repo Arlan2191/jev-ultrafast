@@ -7,7 +7,7 @@ import time
 
 import httpx
 
-from .questions import GENERATE, NEXT_ACTION, TARGET, TEXT_VALUE, VALUES
+from .questions import GENERATE, NEXT_ACTION, NONE, TARGET, TEXT_VALUE, VALUES
 
 CLIENT = httpx.Client(http2=True, timeout=25)
 
@@ -117,7 +117,12 @@ def choose(state, goal, history, refused=(), completed=(), checks=(), values=())
     elements, targets, controls = action_space(state["actions"])
     labels = {
         "CLICK": "Click an element, button, menu option, autocomplete suggestion, or calendar day.",
-        "TYPE_TEXT": "Enter or replace text in an editable field. A small LLM will supply the value from the goal.",
+        "TYPE_TEXT": "Enter or replace text in an editable field. "
+        + (
+            "The text is one of the declared values, chosen by name."
+            if values
+            else "A small LLM will supply the value from the goal."
+        ),
         "SELECT": "Select an observed dropdown value.",
         "HOVER": "Move the pointer over an element without pressing, to open a hover menu or tooltip.",
         "PRESS_KEY": "Press a key or shortcut. It goes to the focused element (marked focused), or to the page.",
@@ -125,7 +130,12 @@ def choose(state, goal, history, refused=(), completed=(), checks=(), values=())
     }
     operations = {key: labels[key] for key in targets}
     operations.update({key: value["label"] for key, value in controls.items()})
-    operations.update(DONE="Every requirement is visibly satisfied.", BLOCKED="No supported operation can progress.")
+    done = (
+        "The current goal is satisfied and its listed checks hold; checks are verified and a failing DONE is rejected."
+        if checks or completed
+        else "Every requirement is visibly satisfied."
+    )
+    operations.update(DONE=done, BLOCKED="No supported operation can progress.")
     context = {
         "goal": goal,
         **({"completed_steps": list(completed)} if completed else {}),
@@ -163,6 +173,8 @@ def choose(state, goal, history, refused=(), completed=(), checks=(), values=())
         value_choices = {name: {"value": name} for name in values}
         if text_helper_configured():
             value_choices[GENERATE] = "Write the text from the goal and the field with the text helper."
+        else:
+            value_choices[NONE] = "No declared value fits this field: type nothing and leave the field alone."
         questions["type_text_value"] = {
             "type": "choice",
             "criteria": value_choices,
@@ -253,7 +265,13 @@ def field_text(context):
     try:
         output = json.loads(result["choices"][0]["message"]["content"])
         value = output["text"]
-        if set(output) != {"text"} or not isinstance(value, str) or not value.strip() or len(value) > 2000:
+        if (
+            set(output) != {"text"}
+            or not isinstance(value, str)
+            or not value.strip()
+            or len(value) > 2000
+            or "<secret:" in value
+        ):
             raise ValueError()
     except (ValueError, KeyError, TypeError):
         raise ValueError("Text helper returned no valid field value; nothing typed.") from None

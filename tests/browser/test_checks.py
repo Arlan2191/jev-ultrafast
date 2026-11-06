@@ -131,10 +131,45 @@ def test_a_check_that_is_never_met_is_rejected_after_waiting_its_timeout(start, 
 
 
 def test_no_element_waits_for_a_banner_to_close(start, monkeypatch):
-    Script(monkeypatch, lambda executed, history: ("click", "Accept cookies", "CLICK"))
+    script = Script(
+        monkeypatch, lambda executed, history: ("click", "Accept cookies", "CLICK") if executed == 0 else None
+    )
     steps = [Step("Accept", expect=[expect.no_element(role="button", name="Accept cookies"), expect.text("Content")])]
-    final = run(start("steps_banner.html", steps))
+    # The banner closes 400 ms after the click and the post-action settle is off, so the first read still sees it.
+    agent = start("steps_banner.html?late=400", steps, action_settle_timeout_ms=0, expect_timeout_ms=5000)
+    final = run(agent)
     assert final["status"] == "done" and final["verified"] is True
+    assert final["steps"][0]["rejections"] == 0 and script.dones() == 1
+    assert 150 <= final["steps"][0]["checks"][0]["waited_ms"] < 5000  # the DONE waited for the banner to go
+
+
+def test_a_press_that_is_taken_back_after_the_click_does_not_end_done_or_verified(start, monkeypatch):
+    script = Script(monkeypatch, lambda executed, history: ("click", "Upvote", "CLICK") if executed == 0 else None)
+    pressed_check = expect.element(role="button", name="Upvote", state={"pressed": True})
+    # Off: the check is read at once after the click, while the optimistic press is still showing.
+    agent = start(
+        "steps_flaky.html?revert=300",
+        [Step("Upvote it", expect=[pressed_check])],
+        action_settle_timeout_ms=0,
+        expect_timeout_ms=400,
+        max_rejections=2,
+    )
+    final = run(agent)
+    assert final["status"] == "failed" and final["stop_reason"] == "expectations" and final["verified"] is False
+    assert final["steps"][0]["status"] == "failed" and final["steps"][0]["verified"] is False
+    kinds = [h["kind"] for h in final["history"]]
+    assert kinds[0] == "click" and kinds.count("done_rejected") == 2
+    assert pressed(agent) == "false" and script.dones() == 1  # the stable pass rejected the auto-complete, not a DONE
+
+
+def test_a_press_that_stays_does_pass_the_stable_read(start, monkeypatch):
+    Script(monkeypatch, lambda executed, history: ("click", "Upvote", "CLICK") if executed == 0 else None)
+    agent = start(
+        "steps_toggle.html",
+        [Step("Upvote it", expect=[expect.element(role="button", name="Upvote", state={"pressed": True})])],
+    )
+    final = run(agent)
+    assert final["status"] == "done" and final["verified"] is True and final["steps"][0]["rejections"] == 0
 
 
 def test_url_after_a_navigation(start, monkeypatch):
@@ -168,9 +203,13 @@ def test_a_secret_is_typed_for_real_and_absent_from_everything_the_agent_keeps(s
         Step(
             "Enter the code",
             values={"code": Value(SECRET, secret=True)},
-            expect=[expect.check(lambda b: b.evaluate("document.getElementById('code').value") == SECRET, "typed")],
+            expect=[
+                expect.check(
+                    lambda b: b.evaluate("document.getElementById('code').value") == SECRET, "typed", auto=True
+                )
+            ],
         ),
-        Step("Save it", expect=[expect.check(lambda b: b.evaluate("window.saved") == SECRET, "saved")]),
+        Step("Save it", expect=[expect.check(lambda b: b.evaluate("window.saved") == SECRET, "saved", auto=True)]),
     ]
     agent = start(
         "steps_code.html", steps, before_action=lambda action, page, text: hooked.append((text, action["kind"]))

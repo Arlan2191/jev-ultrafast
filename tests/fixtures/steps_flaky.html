@@ -1,0 +1,15 @@
+<!doctype html><title>Flaky toggle</title>
+<button type="button" aria-pressed="false" onclick="press(this)">Upvote</button>
+<p id="status">Not voted</p>
+<script>
+  // An optimistic UI: the press shows at once and is taken back ?revert=<ms> later, as a server that refused would.
+  const revert = Number(new URLSearchParams(location.search).get("revert") || 300);
+  function press(button) {
+    button.setAttribute("aria-pressed", "true");
+    document.getElementById("status").textContent = "Voted";
+    setTimeout(() => {
+      button.setAttribute("aria-pressed", "false");
+      document.getElementById("status").textContent = "Not voted";
+    }, revert);
+  }
+</script>

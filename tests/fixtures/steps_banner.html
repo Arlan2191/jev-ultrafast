@@ -1,3 +1,12 @@
 <!doctype html><title>Banner</title>
-<div id="banner"><p>We use cookies</p><button type="button" onclick="document.getElementById('banner').remove()">Accept cookies</button></div>
+<div id="banner"><p>We use cookies</p><button type="button" onclick="accept()">Accept cookies</button></div>
 <p>Content</p>
+<script>
+  // ?late=<ms> closes the banner that long after the click; without it the banner closes at once.
+  const late = Number(new URLSearchParams(location.search).get("late") || 0);
+  function accept() {
+    const close = () => document.getElementById("banner").remove();
+    if (late) setTimeout(close, late);
+    else close();
+  }
+</script>

@@ -1,10 +1,13 @@
 """Steps: one goal at a time, with optional checked postconditions and caller-provided values."""
 
+import html
+import json
+import urllib.parse
 from dataclasses import dataclass, field
 
 from .expect import Expectation
+from .questions import GENERATE, NONE  # NONE: "no declared value fits", offered when values but no text helper exist.
 
-GENERATE = "GENERATE"
 MAX_TEXT = 2000
 MIN_SECRET = 4
 STATUSES = ("pending", "active", "done", "failed", "blocked")
@@ -14,11 +17,27 @@ def redaction(name):
     return f"<secret:{name}>"
 
 
+def secret_forms(text):
+    """The ways a page can echo a secret back: as typed, percent-encoded (a GET form), plus-encoded, JSON-escaped and
+    HTML-escaped. Case changes, collapsed whitespace and a cut-off tail are not covered (see the README)."""
+    forms = {
+        text,
+        urllib.parse.quote(text),
+        urllib.parse.quote(text, safe=""),
+        urllib.parse.quote_plus(text),
+        json.dumps(text)[1:-1],
+        html.escape(text),
+        html.escape(text, quote=False),
+    }
+    return sorted(forms, key=lambda form: -len(form))
+
+
 @dataclass(frozen=True)
 class Value:
     """Text the caller already knows. The model picks it by name and never sees it. secret=True also keeps it out of
     history, state, hook arguments and the page the model reads (a secret shorter than 4 characters is refused: it
-    could not be redacted without mangling other text)."""
+    could not be redacted without mangling other text; a short one still replaces every occurrence, so "1234" also
+    changes "$1234.00" in what the model reads)."""
 
     text: str
     secret: bool = False
@@ -59,8 +78,11 @@ def validate_values(values):
         raise ValueError("values must be a dict of name -> str or Value")
     checked = {}
     for name, value in values.items():
-        if not isinstance(name, str) or not name.strip() or len(name) > 64 or name != name.strip() or name == GENERATE:
-            raise ValueError(f"A value name must be a plain non-empty string of at most 64 characters, not {GENERATE}")
+        plain = isinstance(name, str) and name.strip() and name == name.strip() and len(name) <= 64
+        if not plain or name in {GENERATE, NONE}:
+            raise ValueError(
+                f"A value name must be a plain non-empty string of at most 64 characters, not {GENERATE} or {NONE}"
+            )
         checked[name] = value if isinstance(value, Value) else Value(value) if isinstance(value, str) else None
         if checked[name] is None:
             raise ValueError(f"Value {name!r} must be a string or a Value")
