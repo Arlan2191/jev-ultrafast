@@ -372,7 +372,8 @@ class Browser:
         return self._wait(spec, positive("timeout_ms", timeout_ms))
 
     def text_stable(self, quiet_ms=500, role=None, name=None, timeout_ms=30000):
-        """The visible text of the whole page, or of the element matched by role and name, is unchanged for quiet_ms."""
+        """The visible text of the whole page, or of the element matched by role and name, is unchanged for quiet_ms.
+        Text that has not started to arrive is unchanged too: wait for its first words with text() before."""
         if role is not None and not isinstance(role, str):
             raise ValueError("role must be a string")
         spec = {

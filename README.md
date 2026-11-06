@@ -125,7 +125,7 @@ agent.wait_for("element", role="button", name="Copy")                       # pr
 agent.wait_for("element", role="button", name="Stop generating", present=False)
 agent.wait_for("element", role="checkbox", name=re.compile("^Email"), state={"checked": True})
 agent.wait_for("text", "Report ready")                                       # or a compiled regex; present=False waits for it to go
-agent.wait_for("text_stable", quiet_ms=500, role="textbox", name="Answer")   # the whole page's text without role/name
+agent.wait_for("text_stable", quiet_ms=500, role="textbox", name="Answer")   # the whole page's text without role/name; text that has not started to arrive counts as stable, so wait for its first words with `text` first
 ```
 
 `role` is one of the roles the snapshot understands (`button`, `link`, `checkbox`, `textbox`, ...); `name` is the accessible name, exact or a compiled regex; `state` is a name, a list of names, or `{name: bool}` from `checked`, `expanded`, `selected`, `pressed`, `disabled`. The same role and name code serves the snapshot and the waits (`jev_ultrafast/a11y.js`).

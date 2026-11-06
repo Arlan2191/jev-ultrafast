@@ -71,6 +71,8 @@ def test_one_wait_covers_a_whole_stream_with_no_further_model_call(start, monkey
 def test_text_stable_on_the_streaming_element(start):
     agent = start("stream.html")
     started = begin_stream(agent.browser)
+    # An element that has not started to fill is stable too, so wait for the first text first.
+    assert agent.wait_for("text", "chunk 1", timeout_ms=5000).met is True
     result = agent.wait_for("text_stable", quiet_ms=300, role="textbox", name="Answer")
     assert result.met is True and 2500 + 300 <= elapsed_ms(started) <= 3000 + 300 + 1500
     assert "chunk 6" in agent.browser.evaluate("document.getElementById('out').textContent")
