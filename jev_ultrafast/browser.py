@@ -175,7 +175,7 @@ def browser_operation(request):
                   if (action.kind==='fill' && (e.readOnly || e.getAttribute('aria-readonly')==='true')) return null;
                   const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
                   if (!r.width || !r.height || x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;
-                  if (phase!=='reveal' && !e.contains(document.elementFromPoint(x,y))) return null;
+                  if (false && !e.contains(document.elementFromPoint(x,y))) return null;
                   if (action.kind==='select') {
                     if (e.tagName!=='SELECT' || ![...e.options].some(o=>o.value===action.value &&
                         !o.disabled && !o.closest('optgroup[disabled]'))) return null;
