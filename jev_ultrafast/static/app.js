@@ -31,7 +31,7 @@ async function call(name, body = {}) {
   return data;
 }
 function controls() {
-  const live = state?.page && !["done", "blocked"].includes(state.status);
+  const live = state?.page && !["done", "blocked", "denied", "budget"].includes(state.status);
   $("start").disabled = busy;
   $("scenario").disabled = busy;
   $("goal").disabled = busy;
@@ -85,6 +85,8 @@ function render() {
     predicted: "Choice ready · inspect or execute",
     done: "Jev reports complete · inspect the page",
     blocked: "Stopped · no supported next action",
+    denied: "Stopped · action denied by policy",
+    budget: "Stopped · step or model-call budget reached",
   };
   $("status").textContent = labels[state.status] || state.status;
   if (!page) {
@@ -180,7 +182,7 @@ $("auto").addEventListener("click", () =>
       } else {
         await call("tick");
       }
-      if (["done", "blocked"].includes(state.status)) break;
+      if (["done", "blocked", "denied", "budget"].includes(state.status)) break;
     }
     automatic = false;
   }, "Running the browser…"),

@@ -6,6 +6,7 @@ Read README.md before editing. Keep the loop small: page -> indexed elements -> 
 - TypeSafe chooses an operation and operation-specific target heads in one request. Consume only the selected operation's target.
 - Targets must map to observed elements and supported operations. Never let the model emit selectors or executable code.
 - TYPE_TEXT invokes the text LLM. Cache a stale retry's value only while its entire helper input is identical.
+- `before_action` runs at execution time, after text generation; a veto (`ActionDenied`) never executes and leaves no history entry.
 - Never retry a browser mutation. Log execution before observing its result.
 - Screenshots are optional; the model does not consume them. Keep demonstration footage at its original speed.
 - Keep credentials server-side and .env ignored. Tests must not call paid APIs.
