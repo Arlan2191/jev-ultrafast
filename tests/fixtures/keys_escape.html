@@ -1,0 +1,7 @@
+<!doctype html><title>Escape closes</title>
+<button type="button" id="open" onclick="document.getElementById('d').hidden = false; document.getElementById('field').focus()">Open dialog</button>
+<div id="d" role="dialog" aria-label="Settings" hidden tabindex="-1"
+     onkeydown="if (event.key === 'Escape') { this.hidden = true; window.closed = true }">
+  <input id="field" aria-label="Name">
+</div>
+<script>window.closed = false; document.getElementById('open').click();</script>

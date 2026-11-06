@@ -28,7 +28,7 @@ Every observation produces a new element table:
 ...
 ```
 
-The operations are `CLICK`, `HOVER`, `TYPE_TEXT`, `SELECT`, `SCROLL_UP`, `SCROLL_DOWN`, `WAIT`, `DONE`, and `BLOCKED`. Only supported operations and targets are offered. `HOVER` moves the pointer without pressing, for menus and tooltips that open on hover; it is offered only for elements that hint at a hover effect (`revealed_by`, `aria-haspopup`, `aria-expanded`, a non-empty `title`, or `aria-describedby`) and is left out entirely when none does. Controls that are hidden only by `opacity` until their row is hovered or focused are listed with `revealed_by: "hover"`; `CLICK` moves the pointer onto them, waits up to `reveal_timeout_ms` (default 500) for them to appear, and never presses one that stays transparent. Every click is preceded by a pointer move, and after the move the target is located, hit-tested and compared with its observed guard again (identity, role, name, value and state, `href`; not the surrounding text, which hover legitimately changes), so a page that relabels the control on hover, or covers or moves it, is refused instead of pressed. A refused press is recorded in `state["refused"]` (not in the history), shown to the model as a refused recent action, hidden from the next choice while the page is unchanged, and counts toward `stuck_after`. A control is a hover reveal only when one transparent layer (the control or a close ancestor) sits directly under a visible parent that is not `body`, and neither that layer nor any element between it and the control is `position: fixed`, a dialog (`dialog`, `role="dialog"` or `"alertdialog"`, `aria-modal="true"`, `[popover]`), and the layer itself covers at most a quarter of the viewport. A closed `opacity: 0` dialog, or a large opacity-0 mobile nav panel, is therefore not listed even inside app wrappers, while a toolbar in a tall message is. The remaining limit: a small, non-fixed, non-dialog transparent popover is still listed; a refused press on it is bounded by `stuck_after`.
+The operations are `CLICK`, `HOVER`, `TYPE_TEXT`, `SELECT`, `PRESS_KEY`, `GOTO`, `BACK`, `RELOAD`, `SCROLL_UP`, `SCROLL_DOWN`, `WAIT`, `DONE`, and `BLOCKED`. Only supported operations and targets are offered. `HOVER` moves the pointer without pressing, for menus and tooltips that open on hover; it is offered only for elements that hint at a hover effect (`revealed_by`, `aria-haspopup`, `aria-expanded`, a non-empty `title`, or `aria-describedby`) and is left out entirely when none does. Controls that are hidden only by `opacity` until their row is hovered or focused are listed with `revealed_by: "hover"`; `CLICK` moves the pointer onto them, waits up to `reveal_timeout_ms` (default 500) for them to appear, and never presses one that stays transparent. Every click is preceded by a pointer move, and after the move the target is located, hit-tested and compared with its observed guard again (identity, role, name, value and state, `href`; not the surrounding text, which hover legitimately changes), so a page that relabels the control on hover, or covers or moves it, is refused instead of pressed. A refused press is recorded in `state["refused"]` (not in the history), shown to the model as a refused recent action, hidden from the next choice while the page is unchanged, and counts toward `stuck_after`. A control is a hover reveal only when one transparent layer (the control or a close ancestor) sits directly under a visible parent that is not `body`, and neither that layer nor any element between it and the control is `position: fixed`, a dialog (`dialog`, `role="dialog"` or `"alertdialog"`, `aria-modal="true"`, `[popover]`), and the layer itself covers at most a quarter of the viewport. A closed `opacity: 0` dialog, or a large opacity-0 mobile nav panel, is therefore not listed even inside app wrappers, while a toolbar in a tall message is. The remaining limit: a small, non-fixed, non-dialog transparent popover is still listed; a refused press on it is bounded by `stuck_after`.
 
 ```text
                       one TypeSafe request
@@ -91,6 +91,24 @@ uv run --env-file .env python examples/run.py \
 
 `uv run --env-file .env python examples/flights.py --keep-open` performs the flight search, checks the actual route/date/results, and saves its trace. It does not select or book a flight.
 
+### Keys and navigation
+
+`PRESS_KEY` sends one key to the element that has focus (marked `focused` in the element table), or to the page when nothing does. The model chooses among `Enter`, `Escape`, `Tab`, `Shift+Tab`, the arrow keys, `Space`, `Backspace`, `PageUp`, `PageDown`, `Home`, `End`, and any shortcut chords you declare. It never writes a key or a URL. `BACK` is offered only when the tab has history, `RELOAD` always, and `GOTO` only for pages you declare.
+
+```python
+with Agent(
+    url,
+    "Open the command palette and search for billing",
+    keys=("Control+K", "Meta+K"),
+    urls={"Settings": "https://app.example.com/settings"},
+    navigation_timeout_ms=15000,
+) as agent:
+    for state in agent.run():
+        pass
+```
+
+Declared chords are `(Control|Alt|Shift|Meta)+...+Key`, with at least one modifier and a key from the fixed set, a single letter or digit, or `F1` to `F12`; anything else raises `ValueError` at construction. URLs must be absolute `http(s)` URLs without credentials. After `BACK`, `RELOAD` or `GOTO` the agent waits for a new document (at most `navigation_timeout_ms`) and then observes even if the page is still loading. All of these are browser mutations: they are logged before the observation, never retried, count toward `max_steps` and `stuck_after`, and pass through `before_action` with `kind` `key`, `back`, `reload` or `goto`. A key action carries `key` and `focused` (`role`, `label`, `href` of the focused element, or `None`), so a policy can refuse, for example, Enter on a focused Delete button; `goto` carries `url`. A key press is refused as stale unless the focused element is still the one observed. Limits: keys go through the browser's input path, so a page that ignores synthetic key events or traps focus in a frame or shadow root is out of reach, and a key cannot type text (use `TYPE_TEXT`). Builds on the idea in [browser-use/jev-ultrafast#211](https://github.com/browser-use/jev-ultrafast/pull/211).
+
 ### Budgets and policy
 
 Bound a run and veto actions without touching the agent's internals:
@@ -142,7 +160,7 @@ In six alternating runs with identical models and settings, both versions passed
 
 The same policy opened the requested Wikipedia article in **2.798 s** and passed a local hotel search/filter task in **1.896 s**. Runs, failures, source hashes, and measurement boundaries are in [performance.md](docs/performance.md).
 
-A `DONE` choice still requires independent outcome verification. The DOM reader handles common HTML and ARIA controls, not the full accessible-name specification. Controls hidden by `display`, `visibility`, `aria-hidden`, or `inert` stay unlisted until something else (for example `HOVER` on a parent) shows them. A hover menu whose parent carries none of the hover signals above (for example a bare `<div>` with a CSS `:hover` rule) is not offered `HOVER`, so give such a parent `aria-haspopup`. Shadow roots, frames, canvas, uploads, pop-up tabs, nested scrolling, and arbitrary keyboard widgets remain outside this MVP. Owned tabs share the existing Chrome profile.
+A `DONE` choice still requires independent outcome verification. The DOM reader handles common HTML and ARIA controls, not the full accessible-name specification. Controls hidden by `display`, `visibility`, `aria-hidden`, or `inert` stay unlisted until something else (for example `HOVER` on a parent) shows them. A hover menu whose parent carries none of the hover signals above (for example a bare `<div>` with a CSS `:hover` rule) is not offered `HOVER`, so give such a parent `aria-haspopup`. Shadow roots, frames, canvas, uploads, pop-up tabs, and nested scrolling remain outside this MVP; keyboard support is the fixed key set and the shortcuts you declare. Owned tabs share the existing Chrome profile.
 
 ## Development
 
