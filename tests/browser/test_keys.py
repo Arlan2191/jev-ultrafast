@@ -66,7 +66,7 @@ def test_escape_closes_a_dialog_that_listens_for_keydown(start, monkeypatch):
     agent = start("keys_escape.html", max_steps=1)
     assert agent.browser.evaluate("document.getElementById('d').hidden") is False
     list(agent.run())
-    assert agent.browser.evaluate("window.closed") is True
+    assert agent.browser.evaluate("window.dismissed") is True
 
 
 def test_tab_and_shift_tab_move_focus_between_inputs(start, monkeypatch):
