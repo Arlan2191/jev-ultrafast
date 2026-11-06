@@ -144,6 +144,7 @@ class Agent:
                 return self.stop("budget", "max_model_calls")
             page = state["page"]
             refused = state.get("refused", [])
+            # Drops by node: one refusal hides both the fill and the "Open <label>" click of the same element.
             skip = {r["node"] for r in refused if r["fingerprint"] == page["fingerprint"]}
             if skip:
                 page = {**page, "actions": [a for a in page["actions"] if a.get("node") not in skip]}

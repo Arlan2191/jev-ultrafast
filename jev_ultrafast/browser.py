@@ -163,12 +163,15 @@ def browser_operation(request):
             def locate(phase, guarded=False):
                 # "reveal" skips the opacity and hit-test checks: a control that appears on hover is transparent
                 # (and often pointer-events:none) until the pointer is over its row. "guarded" also compares the
-                # observed guard, so a control whose meaning changed under the moved pointer is never pressed.
+                # observed guard (minus scope text, which hover legitimately changes), so a control that became
+                # something else under the moved pointer is never pressed; a cover or shift is caught by the hit-test.
                 return evaluate("""((action, phase, guarded) => {
                   const e=window.__jevFast?.nodes.get(action.node);
                   if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]') ||
                       !e.checkVisibility({checkOpacity:phase!=='reveal',checkVisibilityCSS:true})) return null;
-                  if (guarded && JSON.stringify(window.__jevFast.guard(e))!==JSON.stringify(action.guard)) return null;
+                  // Hover-tolerant: the observed guard without its trailing scope text (see snapshot.js).
+                  if (guarded && JSON.stringify(window.__jevFast.guard(e,false))!==
+                      JSON.stringify(action.guard?.slice(0,-1))) return null;
                   if (action.kind==='fill' && (e.readOnly || e.getAttribute('aria-readonly')==='true')) return null;
                   const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
                   if (!r.width || !r.height || x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;

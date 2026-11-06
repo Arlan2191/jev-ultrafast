@@ -1,0 +1,15 @@
+<!doctype html><title>Hover rows</title>
+<style>
+  body { font: 14px sans-serif; margin: 16px; }
+  ul { list-style: none; margin: 0 0 12px; padding: 0; }
+  li, td { padding: 6px; border: 1px solid #ccc; }
+  .li-actions { display: none; }
+  li:hover .li-actions { display: inline-flex; gap: 6px; }
+  .tr-actions { visibility: hidden; }
+  tr:hover .tr-actions { visibility: visible; }
+</style>
+<ul><li>Invoice 42 <button type="button" onclick="counts.liOpen++">Open invoice</button>
+  <span class="li-actions"><button type="button">Archive invoice</button><button type="button">Delete invoice</button></span></li></ul>
+<table><tr><td>Order 7 <button type="button" onclick="counts.trOpen++">Open order</button>
+  <span class="tr-actions"><button type="button">Cancel order</button><button type="button">Refund order</button></span></td></tr></table>
+<script>window.counts = {liOpen: 0, trOpen: 0};</script>

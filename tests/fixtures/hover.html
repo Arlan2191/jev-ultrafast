@@ -14,7 +14,6 @@
   .slot button { position: absolute; left: 0; top: 0; width: 110px; height: 24px; }
   .decoy { display: none; }
   .shift:hover .decoy { display: block; z-index: 1; }
-  .shift:hover .st { transform: translateX(300px); }
   .dialog { position: fixed; left: 500px; top: 300px; opacity: 0; pointer-events: none; }
 </style>
 <div class="row"><span>First message</span><button type="button" class="tb" onclick="counts.copy++">Copy</button></div>
@@ -23,7 +22,7 @@
 <div class="row gone"><span>Hidden message</span><button type="button" class="tb" onclick="counts.ghost++">Ghost</button></div>
 <div class="menu"><button type="button" aria-haspopup="true">More</button>
   <div class="sub"><button type="button" onclick="counts.archive++">Archive</button></div></div>
-<div class="row shift"><span>Shifting row</span><span class="slot"><button type="button" class="st" onclick="counts.shifted++">Shift target</button><button type="button" class="decoy" onclick="counts.decoy++">Decoy</button></span></div>
+<div class="row shift"><span>Shifting row</span><span class="slot"><button type="button" class="st" onclick="counts.shifted++">Shift target</button><button type="button" class="decoy" aria-label="Decoy" onclick="counts.decoy++"></button></span></div>
 <div class="row"><button type="button" onmouseenter="this.setAttribute('aria-label','Delete all')" onclick="counts.swapped++">Save draft</button></div>
 <div class="dialog" role="dialog"><button type="button" onclick="counts.dialogOk++">Dialog OK</button><button type="button">Dialog Cancel</button></div>
 <script>window.counts = {copy: 0, edit: 0, honeypot: 0, ghost: 0, archive: 0, shifted: 0, decoy: 0, swapped: 0, dialogOk: 0};</script>

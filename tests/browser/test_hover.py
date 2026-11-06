@@ -73,8 +73,10 @@ def test_reveal_candidates_never_displace_visible_controls_at_the_cap(open_page)
     assert page["omitted_actions"] == 35  # 285 candidates, 250 kept, all visible ones first
 
 
-def test_a_hover_that_shifts_the_target_refuses_the_press(open_page):
-    browser = open_page("hover.html")  # Hovering the row moves the target away and puts a decoy under the old point.
+def test_a_hover_that_covers_the_target_refuses_the_press(open_page):
+    # Hovering the row shows a text-less decoy over the target: the scope text and the guard are unchanged, so only
+    # the hit-test after the pointer move can refuse this press.
+    browser = open_page("hover.html")
     page = browser.observe(screenshot=False)
     with pytest.raises(Refused):
         browser.act(find(page, "Shift target"), page)
@@ -87,6 +89,35 @@ def test_a_hover_that_swaps_the_label_refuses_the_press(open_page):
     with pytest.raises(Refused):
         browser.act(find(page, "Save draft"), page)
     assert counts(browser)["swapped"] == 0
+
+
+@pytest.mark.parametrize(
+    "open_label,counter", [("Open invoice", "liOpen"), ("Open order", "trOpen")]
+)
+def test_a_visible_control_beside_a_hover_toolbar_is_pressed_by_one_click(open_page, open_label, counter):
+    # li: display:none -> inline-flex; tr: visibility:hidden -> visible. The row text changes on hover.
+    browser = open_page("hover_rows.html")
+    page = browser.observe(screenshot=False)
+    assert not labels(page) & {"Archive invoice", "Cancel order"}
+    target = find(page, open_label)
+    assert "revealed_by" not in target
+    browser.act(target, page)
+    assert counts(browser)[counter] == 1
+
+
+def test_a_closed_dialog_or_nav_inside_a_wrapper_lists_none_of_its_buttons(open_page):
+    browser = open_page("hover_wrapped.html")
+    page = browser.observe(screenshot=False)
+    assert not labels(page) & {"Dialog OK", "Menu item"}
+
+
+def test_a_tall_message_still_lists_and_presses_its_small_hover_toolbar(open_page):
+    browser = open_page("hover_wrapped.html")
+    page = browser.observe(screenshot=False)
+    copy = find(page, "Copy message")
+    assert copy["revealed_by"] == "hover"
+    browser.act(copy, page)
+    assert counts(browser)["copy"] == 1
 
 
 def test_a_closed_transparent_dialog_lists_none_of_its_buttons(open_page):
