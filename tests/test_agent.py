@@ -517,7 +517,6 @@ def test_zero_settle_is_accepted(monkeypatch):
         "keys": (),
         "urls": {},
         "navigation_timeout_ms": 15000,
-        "navigation_commit_ms": 1000,
     }
 
 
@@ -869,8 +868,7 @@ def test_valid_urls_pass():
 @pytest.mark.parametrize(
     "kwargs",
     [{"keys": ("K",)}, {"keys": "Control+K"}, {"urls": {"A": "/x"}}, {"navigation_timeout_ms": 0},
-     {"navigation_timeout_ms": "5"}, {"navigation_commit_ms": -1}, {"navigation_commit_ms": "5"},
-     {"navigation_commit_ms": 1.5}],
+     {"navigation_timeout_ms": "5"},],
 )
 def test_navigation_arguments_are_validated_before_a_browser_opens(kwargs, monkeypatch):
     opened = Mock()
@@ -885,10 +883,10 @@ def test_declared_keys_and_urls_are_passed_to_the_browser(monkeypatch):
     opened.return_value.observe.return_value = page()
     monkeypatch.setattr(loop, "Browser", opened)
     Agent("https://example.test/", "goal", keys=("Control+K",), urls={"S": "https://example.test/s"},
-          navigation_timeout_ms=5, navigation_commit_ms=0)
+          navigation_timeout_ms=5)
     kwargs = opened.call_args.kwargs
     assert kwargs["keys"] == ("Control+K",) and kwargs["urls"] == {"S": "https://example.test/s"}
-    assert kwargs["navigation_timeout_ms"] == 5 and kwargs["navigation_commit_ms"] == 0
+    assert kwargs["navigation_timeout_ms"] == 5
 
 
 def event(chord, n=0):
@@ -1008,7 +1006,6 @@ def test_refused_list_is_capped_at_the_last_fifty(runner):
 def bare_browser():
     b = Browser.__new__(Browser)
     b.session, b.keys, b.urls, b.navigation_timeout_ms = "s", (), {}, 10
-    b.navigation_before = None
     b.call = Mock(return_value={})
     return b
 
@@ -1192,86 +1189,6 @@ class Clock:
 
     def sleep(self, seconds):
         self.now += seconds
-
-
-def commit_browser(monkeypatch, reads, commit_ms=1000):
-    import jev_ultrafast.browser as browser
-
-    clock = Clock()
-    monkeypatch.setattr(browser.time, "monotonic", clock.monotonic)
-    monkeypatch.setattr(browser.time, "sleep", clock.sleep)
-    b = bare_browser()
-    b.navigation_commit_ms = commit_ms
-    b.navigation_timeout_ms = 2000
-    it = iter(reads)
-    b.evaluate = Mock(side_effect=lambda _expression: next(it, reads[-1]))
-    b.wait_for_document = Mock()
-    return b, clock
-
-
-def test_a_click_that_starts_no_navigation_costs_one_read_not_the_window(monkeypatch):
-    b, clock = commit_browser(monkeypatch, [[1, "a", False]])
-    b.await_commit([1, "a"])
-    assert b.evaluate.call_count == 1 and clock.now == 0
-    b.wait_for_document.assert_not_called()
-
-
-def test_a_navigation_that_commits_inside_the_window_is_awaited(monkeypatch):
-    reads = [[1, "a", True]] * 5 + [[2, "b", None]]
-    b, clock = commit_browser(monkeypatch, reads)
-    b.await_commit([1, "a"])
-    b.wait_for_document.assert_called_once_with([1, "a"])
-    assert clock.now < 1
-
-
-def test_a_destroyed_context_counts_as_a_commit(monkeypatch):
-    b, _ = commit_browser(monkeypatch, [[1, "a", True]])
-    b.evaluate = Mock(side_effect=[[1, "a", True], StalePage("gone")])
-    b.await_commit([1, "a"])
-    b.wait_for_document.assert_called_once()
-
-
-def test_a_started_navigation_that_never_commits_gives_up_at_the_window(monkeypatch):
-    b, clock = commit_browser(monkeypatch, [[1, "a", True]], commit_ms=300)
-    b.await_commit([1, "a"])
-    b.wait_for_document.assert_not_called()
-    assert 0.3 <= clock.now < 0.4
-
-
-def test_without_the_navigation_api_the_whole_window_is_watched(monkeypatch):
-    b, clock = commit_browser(monkeypatch, [[1, "a", None]], commit_ms=200)
-    b.await_commit([1, "a"])
-    assert 0.2 <= clock.now < 0.3
-
-
-def test_observe_waits_for_a_commit_only_after_an_input_marked_one(monkeypatch):
-    import jev_ultrafast.browser as browser
-
-    b = bare_browser()
-    b.settle_ms, b.autocomplete_settle_ms = 0, 0
-    b.await_commit = Mock()
-    monkeypatch.setattr(browser, "browser_operation", lambda _request: {"ok": True})
-    b.observe(screenshot=False)
-    b.await_commit.assert_not_called()
-    b.navigation_before = [1, "a"]
-    b.observe(screenshot=False)
-    b.await_commit.assert_called_once_with([1, "a"])
-    assert b.navigation_before is None  # Consumed: the next observation does not wait again.
-
-
-def test_inputs_that_may_navigate_mark_the_document_and_a_zero_window_turns_it_off():
-    b = bare_browser()
-    b.navigation_commit_ms = 1000
-    b.evaluate = Mock(return_value=[1, "a"])
-    b.fresh = Mock(return_value=True)
-    b.act({"id": "key:Enter", "kind": "key", "key": "Enter"}, page())
-    assert b.navigation_before == [1, "a"]
-    off = bare_browser()
-    off.navigation_commit_ms = 0
-    off.evaluate = Mock(return_value=[1, "a"])
-    off.fresh = Mock(return_value=True)
-    off.act({"id": "key:Enter", "kind": "key", "key": "Enter"}, page())
-    assert off.navigation_before is None and off.evaluate.call_count == 0
 
 
 def test_back_is_offered_from_the_navigation_entry_in_the_observation(monkeypatch):

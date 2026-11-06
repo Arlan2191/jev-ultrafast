@@ -1,8 +1,6 @@
 """Key presses and navigation on real pages. The model is stubbed, so no paid call is made."""
 
 import json
-import statistics
-import time
 
 import pytest
 
@@ -221,27 +219,3 @@ def test_a_click_on_a_link_whose_server_answers_late_observes_the_new_page(start
     agent.command("tick")
     assert agent.state["page"]["title"] == "Slow result"
     assert agent.state["history"][0]["page_changed"] is True
-
-
-def test_a_click_that_does_not_navigate_pays_no_commit_window(start, monkeypatch):
-    def click_count(page, goal, history, refused=()):
-        a = next(a for a in page["actions"] if a["label"].startswith("Count"))
-        return {"choice": a["id"], "operation": "CLICK", "target": "1", "confidence": 1.0,
-                "probabilities": {a["id"]: 1.0}, "latency_ms": 1, "usage": {}}
-
-    monkeypatch.setattr(loop, "choose", click_count)
-    medians = {}
-    for commit_ms in (0, 1000):
-        agent = start("nav_one.html", max_steps=10, navigation_commit_ms=commit_ms)
-        times = []
-        for _ in range(5):
-            began = time.perf_counter()
-            agent.command("tick")
-            times.append(time.perf_counter() - began)
-        medians[commit_ms] = statistics.median(times)
-        assert agent.browser.evaluate("window.counter") == 5
-    added = medians[1000] - medians[0]
-    print(f"non-navigating click: median {medians[0] * 1000:.0f} ms with the window off, "
-          f"{medians[1000] * 1000:.0f} ms on, added {added * 1000:.0f} ms")
-    assert added < 0.4  # The window is 1 s; a click that starts no navigation must not spend it.
-

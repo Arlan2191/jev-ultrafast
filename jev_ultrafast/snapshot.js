@@ -6,12 +6,6 @@
     const id=cache.ids.get(e); cache.nodes.set(id,e); return id;
   };
   for (const [id,e] of cache.nodes) if (!e.isConnected) cache.nodes.delete(id);
-  // Set when this document starts any navigation (link, form submit, script) so the executor knows to wait for the
-  // new document. Only a flag: it carries no data about the navigation.
-  if (window.navigation && !cache.watchingNavigation) {
-    cache.watchingNavigation=true;
-    window.navigation.addEventListener('navigate',()=>{cache.navigating=true});
-  }
   const safe = e => !['password','file','hidden'].includes(e.type);
   const visible = e => !e.closest('[aria-hidden="true"],[inert]') &&
     e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});

@@ -47,9 +47,6 @@ class Agent:
     keys: extra shortcut chords the caller declares, e.g. ("Control+K",); the fixed keys (Enter, Escape, Tab, ...) are
     always offered. urls: {name: absolute http(s) URL} pages the model may GOTO; it never writes a URL.
     navigation_timeout_ms bounds the wait for a new document after BACK, RELOAD or GOTO (the page is observed anyway).
-    navigation_commit_ms is how long, after a key or click, to watch for the document committing a navigation (a form
-    submitted with Enter, a link); if it does, the new document is awaited like after a GOTO. 0 turns this off. A press
-    that starts no navigation does not wait for the window.
     Key presses and navigation are browser mutations: they are logged, never retried, and go through before_action
     with kind "key" (action["key"], action["focused"]), "back", "reload" or "goto" (action["url"]).
     """
@@ -71,7 +68,6 @@ class Agent:
         keys=(),
         urls=None,
         navigation_timeout_ms=15000,
-        navigation_commit_ms=1000,
     ):
         task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
         if not task:
@@ -83,7 +79,6 @@ class Agent:
         positive_int("autocomplete_settle_ms", autocomplete_settle_ms, minimum=0)
         positive_int("reveal_timeout_ms", reveal_timeout_ms, minimum=0)
         positive_int("navigation_timeout_ms", navigation_timeout_ms)
-        positive_int("navigation_commit_ms", navigation_commit_ms, minimum=0)
         keys = validate_keys(keys)
         urls = validate_urls(urls)
         if before_action is not None and not callable(before_action):
@@ -99,7 +94,6 @@ class Agent:
             keys=keys,
             urls=urls,
             navigation_timeout_ms=navigation_timeout_ms,
-            navigation_commit_ms=navigation_commit_ms,
         )
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)

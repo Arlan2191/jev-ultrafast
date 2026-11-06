@@ -58,13 +58,10 @@ class Browser:
         keys=(),
         urls=None,
         navigation_timeout_ms=15000,
-        navigation_commit_ms=1000,
     ):
         self.keys = offered_keys(keys)
         self.urls = dict(urls or {})
         self.navigation_timeout_ms = navigation_timeout_ms
-        self.navigation_commit_ms = navigation_commit_ms
-        self.navigation_before = None
         self.settle_ms = settle_ms
         self.reveal_timeout_ms = reveal_timeout_ms
         self.autocomplete_settle_ms = autocomplete_settle_ms
@@ -90,43 +87,7 @@ class Browser:
             raise StalePage("Document changed during evaluation")
         return response.get("result", {}).get("value")
 
-    def mark_navigation(self):
-        """Remember the document before an input that may navigate (a key, a click, a select)."""
-        if not getattr(self, "navigation_commit_ms", 0):
-            return
-        try:
-            self.navigation_before = self.evaluate(
-                "(() => { const c=window.__jevFast; if (c) c.navigating=false;"
-                " return [performance.timeOrigin, location.href]; })()"
-            )
-        except (StalePage, RuntimeError):
-            self.navigation_before = None
-
-    def await_commit(self, before):
-        """If the input made the document commit a navigation within navigation_commit_ms, wait for the new one.
-
-        Where the page reports that no navigation even started, this returns after one read: a click that does
-        not navigate costs a single round trip, not the window.
-        """
-        deadline = time.monotonic() + self.navigation_commit_ms / 1000
-        while True:
-            try:
-                now = self.evaluate(
-                    "[performance.timeOrigin, location.href, window.__jevFast?.navigating ?? null]"
-                )
-            except (StalePage, RuntimeError):
-                now = None  # The old context is gone: the new document committed.
-            if now is None or now[:2] != before:
-                self.wait_for_document(before)
-                return
-            if now[2] is False or time.monotonic() >= deadline:
-                return
-            time.sleep(0.02)
-
     def observe(self, screenshot=True):
-        before, self.navigation_before = getattr(self, "navigation_before", None), None
-        if before:
-            self.await_commit(before)
         if getattr(self, "after_input", None):
             action, self.after_input = self.after_input, None
             # This is read-only and happens after execution was logged, even if navigation interrupts it.
@@ -206,7 +167,6 @@ class Browser:
             self.after_input = action
             return {"executed": action["id"]}
         if action["kind"] == "key":
-            self.mark_navigation()
             for event in key_events(action["key"]):
                 self.call("Input.dispatchKeyEvent", **event)
             self.after_input = action
@@ -214,8 +174,6 @@ class Browser:
         if "node" in action:
             # The press-time check compares this guard again after the pointer has moved.
             action = {**action, "guard": page.get("guards", {}).get(str(action["node"]))}
-        if action["kind"] in {"click", "select"}:
-            self.mark_navigation()
         result = browser_operation(
             {
                 "operation": "act",
