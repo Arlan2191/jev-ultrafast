@@ -602,3 +602,33 @@ def test_text_is_not_asked_of_the_helper_when_values_need_no_helper(monkeypatch)
     agent = make(monkeypatch, "go", values={"term": "cats"})
     do(agent, "e1", "TYPE_TEXT", value="term")
     assert agent.state["history"][-1]["text"] == "cats"
+
+
+def test_a_press_that_raises_leaves_no_action_baseline_for_the_next_observation(monkeypatch):
+    import jev_ultrafast.browser as browser
+    from jev_ultrafast.browser import Browser, Refused
+
+    b = Browser.__new__(Browser)
+    b.session, b.keys, b.urls = "s", (), {}
+    b.fresh = Mock(return_value=True)
+    b.evaluate = Mock(return_value={"epoch": 1, "seq": 4})
+    b.reveal_timeout_ms = 0
+    monkeypatch.setattr(browser, "browser_operation", Mock(side_effect=Refused("covered")))
+    with pytest.raises(Refused):
+        b.act({"id": "e3", "kind": "click", "node": 20}, page())
+    assert b.action_mark is None
+
+
+def test_a_failing_settle_leaves_no_action_baseline(monkeypatch):
+    from jev_ultrafast.browser import Browser
+
+    b = Browser.__new__(Browser)
+    b.session, b.keys, b.urls, b.settle_ms, b.autocomplete_settle_ms = "s", (), {}, 0, 0
+    b.after_input = {"kind": "click", "node": 1}
+    b.action_mark = {"epoch": 1, "seq": 4}
+    b.call = Mock(return_value={"result": {"value": {"inflight": 1}}})
+    b.activity_spec = Mock(return_value={})
+    b.settle_after_action = Mock(side_effect=ValueError("the wait failed in the page"))
+    with pytest.raises(ValueError):
+        b.observe(screenshot=False)
+    assert b.action_mark is None
