@@ -6,11 +6,8 @@
     const id=cache.ids.get(e); cache.nodes.set(id,e); return id;
   };
   for (const [id,e] of cache.nodes) if (!e.isConnected) cache.nodes.delete(id);
+  const {visible, shown, name, selector, role} = __A11Y__;
   const safe = e => !['password','file','hidden'].includes(e.type);
-  const visible = e => !e.closest('[aria-hidden="true"],[inert]') &&
-    e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
-  // Hidden only by opacity (CSS visibility, display, aria-hidden and inert still count as hidden).
-  const shown = e => !e.closest('[aria-hidden="true"],[inert]') && e.checkVisibility({checkVisibilityCSS:true});
   // The host a pointer can be moved onto to reveal e. Only ONE transparent layer may sit between the control and a
   // visible host: the control itself or a close ancestor with opacity 0 whose parent passes the full check. A closed
   // opacity-0 dialog, nav or toast is not a hover reveal, so a candidate is dropped when the transparent layer (or
@@ -33,38 +30,6 @@
     if (!p || p===document.body || p===document.documentElement || !visible(p)) return null;
     const r=p.getBoundingClientRect();
     return r.width>0 && r.height>0 ? p : null;
-  };
-  const name = (e,seen=new Set()) => {
-    if (!e || seen.has(e)) return '';
-    seen.add(e);
-    const referenced=(e.getAttribute('aria-labelledby')||'').split(/\s+/)
-      .map(id=>name(document.getElementById(id),seen)).filter(Boolean).join(' ');
-    return referenced || e.getAttribute('aria-label') ||
-      [...(e.labels||[])].map(l=>name(l,seen)).filter(Boolean).join(' ') ||
-      (['button','submit','reset'].includes(e.type) ? e.value : '') || e.getAttribute('alt') ||
-      (e.tagName==='INPUT' ? '' : [...e.childNodes].map(n=>n.nodeType===3 ? n.textContent :
-        n.nodeType===1 && n.getAttribute('aria-hidden')!=='true' ? name(n,seen) : '').join(' ').trim()) ||
-      e.getAttribute('title') || e.getAttribute('placeholder') || '';
-  };
-  const roles=['button','link','checkbox','radio','switch','tab','menuitem','menuitemradio',
-    'option','gridcell','combobox','textbox','searchbox','spinbutton'];
-  const selector='a[href],button,input,textarea,select,summary,[contenteditable="true"],'+
-    roles.map(role=>'[role="'+role+'"]').join(',');
-  const role = e => {
-    const explicit=e.getAttribute('role');
-    if (roles.includes(explicit)) return explicit;
-    if (e.tagName==='BUTTON' || e.tagName==='SUMMARY') return 'button';
-    if (e.tagName==='A') return 'link';
-    if (e.tagName==='SELECT') return 'combobox';
-    if (e.tagName==='TEXTAREA' || e.isContentEditable) return 'textbox';
-    if (e.tagName==='INPUT') {
-      if (['checkbox','radio'].includes(e.type)) return e.type;
-      if (['button','submit','reset','image'].includes(e.type)) return 'button';
-      if (e.type==='search') return 'searchbox';
-      if (e.type==='number') return 'spinbutton';
-      if (['text','email','url','tel'].includes(e.type)) return 'textbox';
-    }
-    return null;
   };
   cache.pageKey=()=>[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
     [...document.querySelectorAll('input,textarea,select')].filter(safe)

@@ -517,6 +517,9 @@ def test_zero_settle_is_accepted(monkeypatch):
         "keys": (),
         "urls": {},
         "navigation_timeout_ms": 15000,
+        "wait_quiet_ms": 500,
+        "wait_timeout_ms": 30000,
+        "action_settle_timeout_ms": 5000,
     }
 
 
