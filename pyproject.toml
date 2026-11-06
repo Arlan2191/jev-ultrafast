@@ -25,3 +25,5 @@ select = ["E", "F", "I"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not browser'"
+markers = ["browser: drives a real Chrome over CDP; set BU_CDP_URL (run with -m browser)"]

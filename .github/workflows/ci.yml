@@ -1,0 +1,82 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.9.0"
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      # `ruff format --check .` is skipped: the codebase is not format-clean yet.
+      - run: uv run pytest
+      - run: node --check jev_ultrafast/static/app.js
+      - run: node --check jev_ultrafast/snapshot.js
+      - run: uv build
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CDP_PORT: "9222"
+      # Browser Harness: no telemetry, no update check.
+      BH_TELEMETRY: "0"
+      BROWSER_HARNESS_TELEMETRY: "0"
+      ANONYMIZED_TELEMETRY: "0"
+      BH_UPDATE_CHECK: "0"
+      # A missing browser must fail the lane, never skip it.
+      JEV_REQUIRE_BROWSER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.9.0"
+      - run: uv sync --locked
+      - name: Start headless Chrome
+        run: |
+          profile="$(mktemp -d)"
+          google-chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
+            --remote-debugging-port="$CDP_PORT" --user-data-dir="$profile" \
+            --no-first-run --no-default-browser-check about:blank > "$RUNNER_TEMP/chrome.log" 2>&1 &
+          echo "CHROME_PID=$!" >> "$GITHUB_ENV"
+          for _ in $(seq 1 60); do
+            curl -fs "http://127.0.0.1:$CDP_PORT/json/version" > /dev/null && exit 0
+            sleep 0.5
+          done
+          cat "$RUNNER_TEMP/chrome.log"
+          echo "Chrome did not expose the DevTools endpoint" >&2
+          exit 1
+      - name: Browser tests
+        env:
+          BU_CDP_URL: http://127.0.0.1:9222
+        run: |
+          mkdir -p artifacts
+          set -o pipefail
+          uv run pytest -m browser -rA 2>&1 | tee artifacts/pytest-browser.txt
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-diagnostics
+          path: |
+            artifacts/
+            ${{ runner.temp }}/chrome.log
+          if-no-files-found: ignore
+      - name: Stop Chrome
+        if: always()
+        run: kill "$CHROME_PID" 2>/dev/null || true
