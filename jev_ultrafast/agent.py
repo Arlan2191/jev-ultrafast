@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import replay as recorded
 from .browser import Browser, Refused, StalePage, content_fingerprint, fingerprint
-from .evidence import DROPPED_PART, MODES, URL_MODES, Evidence, library_version
+from .evidence import DROPPED_PART, MODES, URL_MODES, Evidence, library_version, redact_url
 from .keys import validate_keys, validate_urls
 from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS, NONE
@@ -108,10 +108,13 @@ class Agent:
     the usual path (freshness, before_action, settle, history, evidence; source "replay") and moves on when the step's
     checks hold. When a step diverges (the locator no longer resolves to one element, the control is no longer
     offered, a press is refused or stale twice in a row, the recorded actions are spent while the checks do not
-    hold or do not stay held, a goto URL, scroll distance or key focus differs from the recorded one) heal=True
+    hold or do not stay held, a goto URL, scroll distance, page or key focus differs from the recorded one) heal=True
     (default) hands the rest of that step to the normal model loop and resumes replay at the next step; heal=False
     ends the run as "diverged" with stop_reason "<cause> at step N". A before_action veto still ends the run as
     "denied". state["replay"] counts steps_replayed, steps_healed, actions_replayed and model_calls.
+    replay_quiet_ms: replay only: the quiet window stable() waits before re-reading the checks when the page-side
+    tracker shows nothing pending (default 150; None always keeps the full 500 ms, which also catches rollbacks the
+    tracker cannot see: WebSocket, SSE, postMessage, setInterval, ignore_urls endpoints). A model run ignores it.
     goals: a string, or a list of strings and Step(goal, expect=(), values=None). Each item is one step; the model
     sees only the current step's goal, the goals already completed and the current step's check descriptions.
     Checks (jev_ultrafast.expect) are evaluated in code. A DONE choice on a step with checks is accepted only when
@@ -488,6 +491,18 @@ class Agent:
             return None, found["error"]
         return (self.clean(found), None) if found else (None, "ElementGone")
 
+    def locate_focus(self, page):
+        """The locator of the element that has focus, for a key press (None when nothing has focus, locators are off
+        or the element cannot be found again)."""
+        node = (page.get("focus") or {}).get("node")
+        if not self.locators or type(node) is not int:
+            return None
+        try:
+            found = self.browser.locator(node, full_urls=self.evidence_urls == "full")
+        except Exception:
+            return None
+        return self.clean(found) if found and not found.get("error") else None
+
     def raw_page(self):
         raw = self._raw
         return raw[1] if raw and raw[0] is self.state["page"] else self.state["page"]
@@ -592,7 +607,7 @@ class Agent:
         holds them for an instant, so wait for the page to settle and read every check again."""
         if self.expect_timeout_ms:
             browser = self.state["browser"]
-            quiet = {"quiet_ms": browser.action_settle_quiet_ms} if self.quiet_replay() else {}
+            quiet = {"quiet_ms": self.replay_quiet_ms} if self.quiet_replay() else {}
             browser.settled(timeout_ms=self.expect_timeout_ms, **quiet)
         return self.run_checks(True, everything=True, again=True)
 
@@ -603,14 +618,16 @@ class Agent:
         shorter post-action window is enough. The double read stays."""
         step, _record = self.current_step()
         browser = self.state["browser"]
-        if not self.replaying() or not step or not all(e.cheap for e in step.expect):
+        if self.replay_quiet_ms is None or not self.replaying() or not step or not all(e.cheap for e in step.expect):
             return False
         if not browser.action_settle_timeout_ms:
             return False  # The caller turned the post-action wait off: this window is the only guard left.
         try:
-            return not needs_settle(browser.activity())
+            activity = browser.activity()
         except Exception:
             return False
+        # None: the page is navigating or too busy to answer. That is exactly when it cannot vouch for itself.
+        return activity is not None and not needs_settle(activity)
 
     def reject(self, unmet):
         """Record a DONE that did not hold (also a step that completed by itself but did not stay complete). Returns
@@ -843,6 +860,7 @@ class Agent:
                     self.end_step("blocked")
                     return self.stop("denied")
             locator, locator_error = self.locate(action)
+            focus_locator = self.locate_focus(page) if shown["kind"] == "key" else None
             # Browser.act checks freshness immediately before input, including after text generation.
             try:
                 outcome = state["browser"].act(action, raw, text=text)
@@ -902,6 +920,8 @@ class Agent:
                     value_name=value_name,
                     key=shown.get("key"),
                     focus=shown.get("focused") if shown["kind"] == "key" else None,
+                    **({"focus_locator": focus_locator} if shown["kind"] == "key" else {}),
+                    page_url=redact_url(page["url"]),
                     url=shown.get("url"),
                     result=outcome if isinstance(outcome, dict) else None,
                 )
@@ -975,7 +995,10 @@ class Agent:
             cause = recorded.unresolved(found)
             action, cause = (None, cause) if cause else recorded.element_action(planned, actions, found["node"])
         else:
-            action, cause = recorded.control_action(planned, actions, self.state["page"].get("focus"))
+            page_ = self.state["page"]
+            action, cause = recorded.control_action(
+                planned, actions, page_.get("focus"), self.focus_node(planned), page_["url"]
+            )
         if cause:
             return None, cause
         decision = {
@@ -988,6 +1011,17 @@ class Agent:
                 return None, cause
             decision |= extra
         return decision, None
+
+    def focus_node(self, planned):
+        """The node the locator of a recorded key's focused element resolves to now, or None (like a click's locator:
+        unique, verified and observed, else nothing)."""
+        if planned.kind != "key" or not planned.focus_locator:
+            return None
+        try:
+            found = self.browser.resolve(planned.focus_locator, node=True)
+        except Exception:
+            return None
+        return None if recorded.unresolved(found) else found["node"]
 
     def replay_tick(self):
         state, run = self.state, self.replay

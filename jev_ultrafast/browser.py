@@ -199,7 +199,8 @@ class Browser:
         found = self.evaluate(
             "(() => { const {resolve, textOf}=" + A11Y + f"; const r=resolve({json.dumps(locator)});"
             " return {rule:r.rule, unique:r.unique, count_match:r.count_match, verified:r.verified,"
-            " hint:r.hint ?? null, tag:r.element ? r.element.tagName.toLowerCase() : null,"
+            " hint:r.hint ?? null, digest_changed:r.digest_changed===true,"
+            " tag:r.element ? r.element.tagName.toLowerCase() : null,"
             " text:r.element ? textOf(r.element) : null,"
             " node:r.element ? (window.__jevFast?.ids.get(r.element) ?? null) : null}; })()"
         )

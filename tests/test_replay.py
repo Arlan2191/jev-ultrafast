@@ -963,6 +963,9 @@ def test_unknown_activity_keeps_the_full_window(journey):
 
 def test_the_replay_window_is_a_knob(journey):
     assert quiet_windows(journey, QUIET, replay_quiet_ms=300) == [300, 300, 300]
+
+
+def test_no_replay_window_means_the_full_window_always(journey):
     assert quiet_windows(journey, QUIET, replay_quiet_ms=None) == [None, None, None]
 
 

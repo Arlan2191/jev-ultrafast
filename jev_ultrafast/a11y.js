@@ -87,19 +87,50 @@
       (rname!==null || (c.tagName.toLowerCase()===tag && (c.type ?? null)===type)));
   const textOf = e => e.isContentEditable || e.tagName==='SELECT' || e.tagName==='TEXTAREA' ? '' :
     clip(e.innerText || e.textContent);
-  // A short digest of the text a container shows: whitespace-normalised, no field values (an input has no text node;
-  // a textarea, a select and an editable region are skipped), nothing hidden. Tells apart look-alike rows by what
-  // they say, so a re-sorted list is not mistaken for the recorded one. 32-bit FNV-1a, hex.
+  // A digest of the text a container shows: whitespace-normalised, no field values (an input has no text node; a
+  // textarea, a select and an editable region are skipped), nothing hidden. Tells apart look-alike rows by what they
+  // say, so a re-sorted list is not mistaken for the recorded one. Hashes ALL of the text (no clip), two independent
+  // 32-bit lanes (cyrb53-style, 16 hex characters). Past DIGEST_NODES text nodes it gives up: null, which `resolve`
+  // treats as "cannot tell" and never as "equal".
+  const DIGEST_NODES = 20000;
   const textDigest = root => {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), parts = [];
+    if (!root) return null;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let h1=0xdeadbeef, h2=0x41c6ce57, started=false, gap=false, count=0;
+    const feed = c => { h1=Math.imul(h1^c,2654435761); h2=Math.imul(h2^c,1597334677); };
     for (let n=walker.nextNode(); n; n=walker.nextNode()) {
       const p=n.parentElement;
-      if (p && !p.closest('script,style,template,textarea,select,[contenteditable="true"]') && shown(p)) parts.push(n.textContent);
+      if (!p || p.closest('script,style,template,textarea,select,[contenteditable="true"]') || !shown(p)) continue;
+      if (++count>DIGEST_NODES) return null;
+      if (started) gap=true; // Text nodes are separated like the words of one sentence.
+      for (const ch of n.textContent) {
+        if (/\s/.test(ch)) { if (started) gap=true; continue; }
+        if (gap) { feed(32); gap=false; }
+        started=true;
+        for (let i=0; i<ch.length; i++) feed(ch.charCodeAt(i));
+      }
     }
-    const text=parts.join(' ').replace(/\s+/g,' ').trim().slice(0,4000);
-    let h=0x811c9dc5;
-    for (let i=0; i<text.length; i++) { h^=text.charCodeAt(i); h=Math.imul(h,0x01000193)>>>0; }
-    return h.toString(16).padStart(8,'0');
+    h1=Math.imul(h1^(h1>>>16),2246822507); h1^=Math.imul(h2^(h2>>>13),3266489909);
+    h2=Math.imul(h2^(h2>>>16),2246822507); h2^=Math.imul(h1^(h1>>>13),3266489909);
+    return (h2>>>0).toString(16).padStart(8,'0')+(h1>>>0).toString(16).padStart(8,'0');
+  };
+  // The container whose text tells look-alikes apart: the smallest common ancestor of the matching elements when there
+  // are several (their list, not the whole page: a clock or banner elsewhere is not part of it), else `fallback`.
+  const commonAncestor = els => {
+    let a=els[0].parentElement;
+    while (a && !els.every(e => a.contains(e))) a=a.parentElement;
+    return a;
+  };
+  const digestOf = (matches, fallback) =>
+    textDigest(matches.length>1 ? (commonAncestor(matches) ?? document.body) : fallback);
+  // A link target reduced to what a trace keeps: scheme only for anything but http(s), else path (;parameter values
+  // dropped) and query keys. Recorded (redacted or full) and current compare through this.
+  const hrefKey = h => {
+    if (typeof h!=='string') return null;
+    const scheme=/^([a-z][a-z0-9+.-]*:)/i.exec(h);
+    if (scheme) return scheme[1].toLowerCase();
+    const [path, query='']=h.split('#')[0].split('?');
+    return path.replace(/;([^=;/]*)=[^;/]*/g,';$1')+'?'+query.split('&').filter(Boolean).map(p => p.split('=')[0]).join('&');
   };
   const TEST_ATTRS = ['data-testid','data-test','data-qa','data-cy'];
   const withTestId = v => [...document.querySelectorAll(TEST_ATTRS.map(a => '['+a+']').join(','))]
@@ -157,9 +188,9 @@
       id: anchorId(e.id) ? e.id : null, id_unique: anchorId(e.id) ? withId(e.id)===1 : null, scope,
       ordinal: {scope: inScope.indexOf(e), scope_count: inScope.length,
         document: inDocument.indexOf(e), document_count: inDocument.length},
-      // Of the scope, or of the page when there is none and look-alikes exist: what `resolve` needs when position
-      // alone would decide (see there).
-      digest: container ? textDigest(container) : (inDocument.length>1 ? textDigest(document.body) : null),
+      // Of the look-alikes' own container (see digestOf), or of the scope when it is the only match: what `resolve`
+      // needs when position alone would decide (see there). Null without look-alikes or a scope.
+      digest: container ? digestOf(inScope, container) : (inDocument.length>1 ? digestOf(inDocument, null) : null),
       text: textOf(e), css_path: cssPath(e),
       rect: {x:Math.round(r.x), y:Math.round(r.y), w:Math.round(r.width), h:Math.round(r.height)},
     };
@@ -173,7 +204,8 @@
   // {element, rule, unique, count_match, verified}. The primary rule (role_name_scope) takes the role + name matches
   // inside the scope (itself found by role + name + ordinal) and accepts one only when the recorded in-scope count
   // (and, with a scope, the recorded scope count) equals the current one and, when position alone decides, the digest of
-  // the scope's text (the page's, without a scope) equals the recorded one; otherwise it refuses with rule "ambiguous".
+  // the look-alikes' container (see digestOf) equals the recorded one; otherwise it refuses with rule "ambiguous"
+  // (digest_changed: true when the digest was the reason).
   // Then test_id and a unique stable id, each accepted only if `verifies`, unique then and now, and not under a
   // scope that had siblings of its kind (its count was 1 or there was no scope). css_path is never a resolution: it comes
   // back as {element:null, rule:'hint', hint:{tag,text}} for the caller to show or ignore.
@@ -196,9 +228,11 @@
         if (!Number.isInteger(ordinal) || !element || !count_match) return none('ambiguous');
         // Position alone decides among look-alikes (several matches in the scope, or sibling scopes of the same
         // name): then what the scope says must be what it said. A locator without a digest (schema 1) cannot tell.
-        if ((!unique || (loc.scope && loc.scope.count>1)) &&
-            (typeof loc.digest!=='string' || textDigest(loc.scope ? root : document.body)!==loc.digest))
-          return none('ambiguous');
+        if (!unique || (loc.scope && loc.scope.count>1)) {
+          const now = digestOf(found, loc.scope ? root : null);
+          if (typeof loc.digest!=='string' || typeof now!=='string') return none('ambiguous');
+          if (now!==loc.digest) return {...none('ambiguous'), digest_changed:true};
+        }
         if (verifies(element, loc)) return {element, rule:'role_name_scope', unique, count_match, verified:true};
       }
     }
