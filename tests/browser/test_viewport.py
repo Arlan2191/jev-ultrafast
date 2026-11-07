@@ -1,5 +1,7 @@
 """The viewport option against a real tab: responsive layout and the wheel at a small size."""
 
+import time
+
 
 def labels(page):
     return [a["label"] for a in page["actions"] if "node" in a]
@@ -23,4 +25,8 @@ def test_the_wheel_scrolls_at_a_small_viewport(open_page):
     assert (page["w"], page["h"]) == (800, 600) and page["scroll"]["y"] == 0
     down = next(a for a in page["actions"] if a["id"] == "scroll_down")
     browser.act(down, page)
+    # The wheel event is applied by the compositor a moment after dispatch.
+    deadline = time.monotonic() + 5
+    while browser.evaluate("scrollY") == 0 and time.monotonic() < deadline:
+        time.sleep(0.05)
     assert browser.evaluate("scrollY") > 0
