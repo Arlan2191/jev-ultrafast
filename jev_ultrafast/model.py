@@ -7,7 +7,7 @@ import time
 
 import httpx
 
-from .questions import NEXT_ACTION, TARGET, TEXT_VALUE
+from .questions import GENERATE, NEXT_ACTION, NONE, TARGET, TEXT_VALUE, VALUES
 
 CLIENT = httpx.Client(http2=True, timeout=25)
 
@@ -108,11 +108,21 @@ def recent_actions(history, refused=()):
     ]
 
 
-def choose(state, goal, history, refused=()):
+def text_helper_configured():
+    return bool(os.environ.get("TEXT_MODEL_API_KEY"))
+
+
+def choose(state, goal, history, refused=(), completed=(), checks=(), values=()):
+    """values: the declared value NAMES (never their contents). With names, TYPE_TEXT gets a value head."""
     elements, targets, controls = action_space(state["actions"])
     labels = {
         "CLICK": "Click an element, button, menu option, autocomplete suggestion, or calendar day.",
-        "TYPE_TEXT": "Enter or replace text in an editable field. A small LLM will supply the value from the goal.",
+        "TYPE_TEXT": "Enter or replace text in an editable field. "
+        + (
+            "The text is one of the declared values, chosen by name."
+            if values
+            else "A small LLM will supply the value from the goal."
+        ),
         "SELECT": "Select an observed dropdown value.",
         "HOVER": "Move the pointer over an element without pressing, to open a hover menu or tooltip.",
         "PRESS_KEY": "Press a key or shortcut. It goes to the focused element (marked focused), or to the page.",
@@ -120,9 +130,19 @@ def choose(state, goal, history, refused=()):
     }
     operations = {key: labels[key] for key in targets}
     operations.update({key: value["label"] for key, value in controls.items()})
-    operations.update(DONE="Every requirement is visibly satisfied.", BLOCKED="No supported operation can progress.")
+    done = (
+        "The current goal is satisfied and its listed checks hold; checks are verified and a failing DONE is rejected."
+        if checks or completed
+        else "Every requirement is visibly satisfied."
+    )
+    operations.update(DONE=done, BLOCKED="No supported operation can progress.")
+    context = {
+        "goal": goal,
+        **({"completed_steps": list(completed)} if completed else {}),
+        **({"checks": list(checks)} if checks else {}),
+    }
     questions = {
-        "operation": {"type": "choice", "criteria": operations, "instructions": {"goal": goal, "rules": NEXT_ACTION}}
+        "operation": {"type": "choice", "criteria": operations, "instructions": {**context, "rules": NEXT_ACTION}}
     }
     for operation, candidates in targets.items():
         questions[operation.lower() + "_target"] = {
@@ -145,7 +165,20 @@ def choose(state, goal, history, refused=()):
                 )
                 for index, a in candidates.items()
             },
-            "instructions": {"goal": goal, "operation": operation, "rules": [NEXT_ACTION, TARGET]},
+            "instructions": {**context, "operation": operation, "rules": [NEXT_ACTION, TARGET]},
+        }
+    value_choices = {}
+    if values and "TYPE_TEXT" in targets:
+        # Names only: the model never reads what a value says, so a secret cannot reach it.
+        value_choices = {name: {"value": name} for name in values}
+        if text_helper_configured():
+            value_choices[GENERATE] = "Write the text from the goal and the field with the text helper."
+        else:
+            value_choices[NONE] = "No declared value fits this field: type nothing and leave the field alone."
+        questions["type_text_value"] = {
+            "type": "choice",
+            "criteria": value_choices,
+            "instructions": {**context, "operation": "TYPE_TEXT", "rules": [VALUES]},
         }
     body = {
         "model": os.environ.get("TYPESAFE_MODEL", "jev-latest"),
@@ -172,10 +205,14 @@ def choose(state, goal, history, refused=()):
     else:
         choice = controls[operation]["id"] if operation in controls else operation
         probabilities[choice] = operation_answer["probabilities"][operation]
+    value = None
+    if operation == "TYPE_TEXT" and value_choices:
+        value = validate_choice(result["answers"].get("type_text_value", {}), value_choices)["choice"]
     return {
         "choice": choice,
         "operation": operation,
         "target": target,
+        "value": value,
         "confidence": operation_answer["confidence"],
         "probabilities": probabilities,
         "operation_probabilities": operation_answer["probabilities"],
@@ -228,7 +265,13 @@ def field_text(context):
     try:
         output = json.loads(result["choices"][0]["message"]["content"])
         value = output["text"]
-        if set(output) != {"text"} or not isinstance(value, str) or not value.strip() or len(value) > 2000:
+        if (
+            set(output) != {"text"}
+            or not isinstance(value, str)
+            or not value.strip()
+            or len(value) > 2000
+            or "<secret:" in value
+        ):
             raise ValueError()
     except (ValueError, KeyError, TypeError):
         raise ValueError("Text helper returned no valid field value; nothing typed.") from None

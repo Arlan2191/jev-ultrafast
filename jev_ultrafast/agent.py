@@ -2,16 +2,47 @@
 
 import base64
 import copy
+import functools
+import re
 import time
 from pathlib import Path
 
-from .browser import Browser, Refused, StalePage, content_fingerprint
+from .browser import Browser, Refused, StalePage, content_fingerprint, fingerprint
 from .keys import validate_keys, validate_urls
 from .model import action_space, choose, field_context, field_text
-from .questions import MAX_STEPS
+from .questions import MAX_STEPS, NONE
+from .steps import parse_goals, redaction, secret_forms, validate_values
 from .waits import MAX_WAITS, attribute_names, ignore_patterns
 
-TERMINAL = {"done", "blocked", "denied", "budget"}
+TERMINAL = {"done", "blocked", "denied", "budget", "failed"}
+# Dropped from the copy of a page that the model and the state see when a secret value is declared: the marker and the
+# element guards hold raw field values, and only the browser needs them (it keeps the raw page).
+RAW_ONLY = {"marker", "guards"}
+UNTOUCHED = {"screenshot"}  # The fingerprint is recomputed from the scrubbed page (see Agent.shown).
+
+
+@functools.lru_cache(maxsize=32)
+def secret_pattern(secrets):
+    return re.compile("|".join(re.escape(text) for text, _name in secrets))
+
+
+def scrub_text(text, secrets):
+    """One pass, longest form first, so a marker that was just written is never scrubbed again."""
+    names = dict(secrets)
+    return secret_pattern(tuple(secrets)).sub(lambda found: redaction(names[found.group()]), text)
+
+
+def scrub(value, secrets):
+    """A copy of an observation with every secret text replaced by its marker."""
+    if isinstance(value, str):
+        return scrub_text(value, secrets) if secrets else value
+    if isinstance(value, dict):
+        return {
+            k: v if k in UNTOUCHED else scrub(v, secrets) for k, v in value.items() if k not in RAW_ONLY
+        }
+    if isinstance(value, list | tuple):
+        return [scrub(v, secrets) for v in value]
+    return value
 
 
 class ActionDenied(Exception):
@@ -63,10 +94,26 @@ class Agent:
     wait_ignore_attributes: attribute names (for example ("style",)) whose changes are not DOM activity.
     wait_interactive_grace_ms: how long a document may stay "interactive" before it counts as loaded.
     A WAIT goes through before_action like any action.
+    goals: a string, or a list of strings and Step(goal, expect=(), values=None). Each item is one step; the model
+    sees only the current step's goal, the goals already completed and the current step's check descriptions.
+    Checks (jev_ultrafast.expect) are evaluated in code. A DONE choice on a step with checks is accepted only when
+    all hold, each waiting at most expect_timeout_ms (default 5000); otherwise it is rejected (history kind
+    "done_rejected", shown to the model as a recent action), and max_rejections rejections on one step (default 3)
+    end the run as "failed" with stop_reason "expectations". After every executed action the checks run once without
+    waiting, and a step whose checks all hold completes without a DONE decision (auto_complete=False turns that off).
+    state["verified"] is True when every step had checks and all passed; require_expectations=True makes a step
+    without checks a construction error. values: {name: str | Value(text, secret=False)} for typing, for all steps (a
+    Step's own values override). The model chooses a value by name only and never sees its text; secret values are
+    redacted as "<secret:name>" in history, state and the page the model reads, and before_action receives that marker
+    as text, with the name as action["value_name"].
     new_window: None (default) gives the owned tab a window of its own only in headless Chrome, where a background
     tab is throttled to about one frame per second after its first clicks; True or False force it. Headed Chrome
     has not been tested, and a new window there is a visible one.
     """
+
+    # What an Agent built without __init__ (a test double) means: one unchecked step, no values.
+    steps, values, secrets, _raw = (), {}, (), None
+    expect_timeout_ms, max_rejections, auto_complete = 5000, 3, True
 
     def __init__(
         self,
@@ -94,10 +141,35 @@ class Agent:
         body_cap_ms=30000,
         wait_ignore_attributes=(),
         wait_interactive_grace_ms=2000,
+        expect_timeout_ms=5000,
+        max_rejections=3,
+        auto_complete=True,
+        require_expectations=False,
+        values=None,
     ):
-        task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
-        if not task:
-            raise ValueError("Supply a task")
+        steps = parse_goals(goals)
+        positive_int("expect_timeout_ms", expect_timeout_ms, minimum=0)
+        positive_int("max_rejections", max_rejections)
+        for name, flag in (("auto_complete", auto_complete), ("require_expectations", require_expectations)):
+            if type(flag) is not bool:
+                raise ValueError(f"{name} must be True or False")
+        if require_expectations:
+            for number, step in enumerate(steps, 1):
+                if not step.expect:
+                    raise ValueError(f"Step {number} has no expect checks (require_expectations=True)")
+        values = validate_values(values)
+        secrets = {
+            form: name
+            for source in (values, *(s.values for s in steps))
+            for name, v in source.items()
+            if v.secret
+            for form in secret_forms(v.text)
+        }
+        secrets = tuple(sorted(secrets.items(), key=lambda item: (-len(item[0]), item[0])))
+        if secrets:
+            texts = [step.goal for step in steps] + [e.description for step in steps for e in step.expect]
+            if any(secret_pattern(secrets).search(text) for text in texts):
+                raise ValueError("A goal or check description contains a declared secret value; describe it by name")
         self.max_steps = positive_int("max_steps", max_steps)
         self.max_model_calls = positive_int("max_model_calls", max_model_calls, optional=True) or self.max_steps * 2
         self.stuck_after = positive_int("stuck_after", stuck_after)
@@ -120,7 +192,11 @@ class Agent:
         if before_action is not None and not callable(before_action):
             raise ValueError("before_action must be callable")
         self.before_action = before_action
-        plan = [task]
+        plan = [step.goal for step in steps]
+        self.steps, self.values = steps, values
+        self.expect_timeout_ms, self.max_rejections = expect_timeout_ms, max_rejections
+        self.auto_complete = auto_complete
+        self.secrets = secrets
         self.pending_text = None
         self.browser = Browser(
             url,
@@ -143,13 +219,31 @@ class Agent:
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
         try:
-            page = self.browser.observe(screenshot=self.screenshots)
+            page = self.shown(self.browser.observe(screenshot=self.screenshots))
         except Exception:
             self.browser.close()
             raise
         self.state = dict(
             browser=self.browser,
-            goal="\n".join(plan),
+            goal=self.clean("\n".join(plan)),
+            steps=[
+                dict(
+                    goal=self.clean(step.goal),
+                    status="active" if i == 0 else "pending",
+                    checks=[
+                        dict(description=self.clean(e.description), met=None, reason=None, waited_ms=None)
+                        for e in step.expect
+                    ],
+                    started_ms=None,
+                    ended_ms=None,
+                    model_calls=0,
+                    actions=0,
+                    rejections=0,
+                    verified=False,
+                )
+                for i, step in enumerate(steps)
+            ],
+            verified=False,
             page=page,
             decision=None,
             history=[],
@@ -158,7 +252,7 @@ class Agent:
             denied=None,
             refused=[],
             waits=[],
-            plan=plan,
+            plan=[self.clean(goal) for goal in plan],
             plan_index=0,
             decisions=[],
             text_calls=[],
@@ -171,10 +265,172 @@ class Agent:
             (self.record_dir / "000000.jpg").write_bytes(base64.b64decode(page["screenshot"]))
 
     def snapshot(self):
+        self.sync_step()
         return {
             **{k: v for k, v in self.state.items() if k != "browser"},
             "elements": action_space(self.state["page"]["actions"])[0],
         }
+
+    # Observation, steps and checks.
+
+    def clean(self, text):
+        """Text that is recorded or sent, with every declared secret replaced by its marker."""
+        return scrub(text, self.secrets)
+
+    def shown(self, raw):
+        """The copy of an observation that the model and the state keep: every declared secret hidden, and the
+        fingerprint computed from what is left, so it cannot be used to test a guess. The browser is always checked
+        and driven with the raw observation (raw_page)."""
+        if not self.secrets:
+            return raw
+        shown = scrub(raw, self.secrets)
+        shown["fingerprint"] = fingerprint(shown)
+        self._raw = (shown, raw)
+        return shown
+
+    def observe(self):
+        return self.shown(self.state["browser"].observe(screenshot=self.screenshots))
+
+    def raw_page(self):
+        raw = self._raw
+        return raw[1] if raw and raw[0] is self.state["page"] else self.state["page"]
+
+    def now_ms(self):
+        started = self.state.get("started_at")
+        return round((time.perf_counter() - started) * 1000) if started is not None else 0
+
+    def executed(self):
+        """Executed actions: a rejected DONE is in the history (the model must see it) but is not an action."""
+        return sum(h["kind"] != "done_rejected" for h in self.state["history"])
+
+    def current_step(self):
+        """(the Step, its state record), or (None, None) for an Agent without steps."""
+        records = self.state.get("steps")
+        index = self.state.get("plan_index", 0)
+        if not records or index >= len(records):
+            return None, None
+        return self.steps[index], records[index]
+
+    def goal(self):
+        step, _record = self.current_step()
+        return step.goal if step else self.state["goal"]
+
+    def current_values(self):
+        step, _record = self.current_step()
+        return {**self.values, **(step.values if step else {})}
+
+    def sync_step(self):
+        """Counts of the active step: model calls and executed actions since it started."""
+        _step, record = self.current_step()
+        if record and record["status"] == "active":
+            marks = self.__dict__.setdefault("_marks", {}).get(self.state["plan_index"], (0, 0))
+            record["model_calls"] = self.model_calls() - marks[0]
+            record["actions"] = self.executed() - marks[1]
+
+    def activate(self, record):
+        record.update(status="active", started_ms=self.now_ms() if self.state.get("started_at") else None)
+        marks = self.__dict__.setdefault("_marks", {})
+        marks[self.state["steps"].index(record)] = (self.model_calls(), self.executed())
+
+    def end_step(self, status, verified=False):
+        _step, record = self.current_step()
+        if record and record["status"] == "active":
+            self.sync_step()
+            record.update(status=status, ended_ms=self.now_ms(), verified=verified)
+
+    def finish_run(self):
+        state = self.state
+        state["status"], state["stop_reason"] = "done", None
+        state["plan_index"] = len(state["steps"]) if state.get("steps") else 1
+        state["verified"] = bool(state.get("steps")) and all(r["verified"] for r in state["steps"])
+        state["elapsed_ms"] = self.now_ms()
+
+    def complete_step(self):
+        """The current step holds: advance, or end the run when it was the last."""
+        state = self.state
+        verified = bool(self.current_step()[0].expect)
+        self.end_step("done", verified)
+        if state["plan_index"] + 1 >= len(state["steps"]):
+            return self.finish_run()
+        state["plan_index"] += 1
+        self.activate(state["steps"][state["plan_index"]])
+        state["status"] = "ready"
+        state["elapsed_ms"] = self.now_ms()
+
+    def run_checks(self, once, *, everything=False, again=False):
+        """Evaluate the current step's checks in code and record each result. once=True is the cheap pass: no waiting,
+        and it stops at the first unmet check (the later ones show as unread) unless everything=True. Otherwise every
+        check runs, each waiting at most its timeout. again=True is the read after the settle: waited_ms adds up.
+        Returns the unmet (description, reason) pairs."""
+        step, record = self.current_step()
+        unmet, stopped = [], False
+        for expectation, entry in zip(step.expect, record["checks"], strict=True):
+            if stopped:
+                entry.update(met=None, reason=None, waited_ms=None)
+                continue
+            timeout = 0 if once else expectation.timeout_for(self.expect_timeout_ms)
+            result = expectation.evaluate(self.state["browser"], timeout)
+            reason = self.clean(result.reason)
+            waited = result.waited_ms + ((entry["waited_ms"] or 0) if again else 0)
+            entry.update(met=result.met, reason=reason, waited_ms=waited)
+            if not result.met:
+                unmet.append((self.clean(expectation.description), reason))
+                stopped = once and not everything
+        return unmet
+
+    def stable(self):
+        """The checks held once. A page that applies a press optimistically and takes it back (a server that refused)
+        holds them for an instant, so wait for the page to settle and read every check again."""
+        if self.expect_timeout_ms:
+            self.state["browser"].settled(timeout_ms=self.expect_timeout_ms)
+        return self.run_checks(True, everything=True, again=True)
+
+    def reject(self, unmet):
+        """Record a DONE that did not hold (also a step that completed by itself but did not stay complete). Returns
+        True when the rejections ended the run."""
+        state = self.state
+        _step, record = self.current_step()
+        record["rejections"] += 1
+        state["history"].append(
+            {
+                "step": self.executed() + 1,
+                "action": "DONE rejected: " + "; ".join(f"{description} not met" for description, _ in unmet),
+                "kind": "done_rejected",
+                "choice": "DONE",
+                "text": None,
+                "failed": [{"description": d, "reason": r} for d, r in unmet],
+                "page_changed": False,
+                "content_changed": None,
+                "url": state["page"]["url"],
+                "elapsed_ms": self.now_ms(),
+            }
+        )
+        if record["rejections"] >= self.max_rejections:
+            self.end_step("failed")
+            self.stop("failed", "expectations")
+            return True
+        return False
+
+    def decide_done(self):
+        """A DONE choice. Without checks it is accepted as the model's word; with checks it is accepted only when they
+        hold, and again after the page has settled, and otherwise rejected with the failed descriptions in the history
+        for the model to read."""
+        state = self.state
+        step, _record = self.current_step()
+        if step is None:
+            state["status"], state["plan_index"] = "done", 1
+            state["elapsed_ms"] = self.now_ms()
+            return self.snapshot()
+        unmet = self.run_checks(once=False) if step.expect else []
+        if step.expect and not unmet:
+            unmet = self.stable()
+        if not unmet:
+            self.complete_step()
+            return self.snapshot()
+        if not self.reject(unmet):
+            state["status"] = "ready"
+            state["elapsed_ms"] = self.now_ms()
+        return self.snapshot()
 
     WAITS = ("dom_quiet", "network_idle", "settled", "element", "text", "text_stable")
 
@@ -187,7 +443,8 @@ class Agent:
         result = getattr(self.browser, kind)(*args, **kwargs)
         self.browser.mark_activity()
         waits = self.state.setdefault("waits", [])
-        waits.append({"kind": kind, **result.as_dict()})
+        entry = {"kind": kind, **result.as_dict()}
+        waits.append({**entry, "reason": self.clean(entry.get("reason"))} if "reason" in entry else entry)
         del waits[:-MAX_WAITS]
         return result
 
@@ -203,7 +460,7 @@ class Agent:
             except StalePage:
                 state["decision"] = None
                 state["status"] = "ready"
-                state["page"] = state["browser"].observe(screenshot=self.screenshots)
+                state["page"] = self.observe()
                 state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
                 return self.snapshot()
         elif name == "predict":
@@ -211,8 +468,8 @@ class Agent:
                 raise ValueError("Start a demo first")
             if state["started_at"] is None:
                 state["started_at"] = time.perf_counter()
-            if not state["browser"].fresh(state["page"]):
-                state["page"] = state["browser"].observe(screenshot=self.screenshots)
+            if not state["browser"].fresh(self.raw_page()):
+                state["page"] = self.observe()
             state["decision"] = None
             if state["status"] in TERMINAL:
                 raise ValueError("This run has stopped. Start a fresh demo.")
@@ -232,9 +489,17 @@ class Agent:
                         a for a in page["actions"] if a.get("node") not in skip and a["id"] not in skip_ids
                     ],
                 }
-            state["decision"] = choose(
-                page, state["goal"], state["history"], **({"refused": refused[-10:]} if refused else {})
-            )
+            step, record = self.current_step()
+            if record and record["started_ms"] is None:
+                record["started_ms"] = self.now_ms()
+            extra = {"refused": refused[-10:]} if refused else {}
+            if step and record["status"] == "active":
+                done = [self.clean(r["goal"]) for r in state["steps"] if r["status"] == "done"]
+                extra |= {"completed": done} if done else {}
+                extra |= {"checks": [self.clean(e.description) for e in step.expect]} if step.expect else {}
+            values = self.current_values()
+            extra |= {"values": list(values)} if values else {}
+            state["decision"] = choose(page, self.clean(self.goal()), state["history"], **extra)
             state["decisions"].append(
                 {
                     **state["decision"],
@@ -250,69 +515,79 @@ class Agent:
             # Consume once, before any mutation or model call. A retry cannot double-click.
             state["decision"] = None
             selected = decision["choice"]
+            raw = self.raw_page()
             if selected in {"DONE", "BLOCKED"}:
-                if not state["browser"].fresh(page):
+                if not state["browser"].fresh(raw):
                     state["status"] = "ready"
                     raise StalePage("Page changed since the decision. Choose again.")
-                state["status"] = "done" if selected == "DONE" else "blocked"
-                state["plan_index"] = int(selected == "DONE")
+                if selected == "DONE":
+                    return self.decide_done()
+                self.end_step("blocked")
+                state["status"] = "blocked"
+                state["plan_index"] = 0 if not state.get("steps") else state["plan_index"]
                 state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
                 return self.snapshot()
-            action = next(a for a in page["actions"] if a["id"] == selected)
-            if decision["operation"] == "HOVER":
-                action = {**action, "kind": "hover"}
-            if action["kind"] == "key":
-                # Lets a policy refuse a key by what has focus, e.g. Enter on a focused Delete button.
-                focus = page.get("focus") or {}
-                keys = ("role", "label", "href", "tag", "type")
-                action = {**action, "focused": {k: focus.get(k) for k in keys} if focus else None}
-            if len(state["history"]) >= self.max_steps:
+
+            def shape(a):
+                if decision["operation"] == "HOVER":
+                    a = {**a, "kind": "hover"}
+                if a["kind"] == "key":
+                    # Lets a policy refuse a key by what has focus, e.g. Enter on a focused Delete button.
+                    focus = page.get("focus") or {}
+                    keys = ("role", "label", "href", "tag", "type")
+                    a = {**a, "focused": {k: focus.get(k) for k in keys} if focus else None}
+                return a
+
+            shown = shape(next(a for a in page["actions"] if a["id"] == selected))
+            # The executor gets the raw observation's action; everything recorded or shown gets the scrubbed one.
+            action = shown if raw is page else shape(next(a for a in raw["actions"] if a["id"] == selected))
+            if self.executed() >= self.max_steps:
                 return self.stop("budget", "max_steps")
-            text, helper = None, None
+            text, helper, source, value_name, declared = None, None, None, None, None
             if action["kind"] == "fill":
-                if not state["browser"].fresh(page):
+                if not state["browser"].fresh(raw):
                     raise StalePage("Page changed before text generation. Choose again.")
-                context = field_context(state["goal"], action, page, state["history"])
-                if self.pending_text and self.pending_text[0] == context:
-                    _, text, helper = self.pending_text
+                if decision.get("value") == NONE:
+                    # No declared value fits and there is no text helper: type nothing, and leave this field out of
+                    # the next choice (a refusal, so it also counts toward stuck_after).
+                    return self.skip_field(shown, page, selected)
+                declared = self.current_values().get(decision.get("value"))
+                if declared:
+                    # A caller-provided value: no text-model call, and a secret stays out of everything recorded.
+                    text, value_name = declared.text, decision["value"]
+                    source = f"value:{value_name}"
                 else:
-                    if self.model_calls() >= self.max_model_calls:
-                        return self.stop("budget", "max_model_calls")
-                    text, helper = field_text(context)
-                    self.pending_text = (context, text, helper)
-                    state["text_calls"].append({**helper, "field": action["label"], "value": text})
+                    source = "generated"
+                    context = field_context(self.clean(self.goal()), shown, page, state["history"])
+                    if self.pending_text and self.pending_text[0] == context:
+                        _, text, helper = self.pending_text
+                    else:
+                        if self.model_calls() >= self.max_model_calls:
+                            return self.stop("budget", "max_model_calls")
+                        text, helper = field_text(context)
+                        self.pending_text = (context, text, helper)
+                        state["text_calls"].append({**helper, "field": shown["label"], "value": text})
+            recorded = redaction(value_name) if declared and declared.secret else text
+            hooked = {**shown, "value_name": value_name} if action["kind"] == "fill" else shown
             if self.before_action:
                 try:
-                    self.before_action(copy.deepcopy(action), copy.deepcopy(page), text)
+                    self.before_action(copy.deepcopy(hooked), copy.deepcopy(page), recorded)
                 except ActionDenied as veto:
                     self.pending_text = None
                     state["denied"] = {
                         "reason": veto.reason,
-                        "action": action["label"],
-                        "kind": action["kind"],
+                        "action": shown["label"],
+                        "kind": shown["kind"],
                         "choice": selected,
                     }
+                    self.end_step("blocked")
                     return self.stop("denied")
             # Browser.act checks freshness immediately before input, including after text generation.
             try:
-                outcome = state["browser"].act(action, page, text=text)
+                outcome = state["browser"].act(action, raw, text=text)
             except Refused as refusal:
                 # Nothing was pressed (or sent): not history, but the model and stuck_after must see it.
-                refused = state.setdefault("refused", [])
-                del refused[:-49]
-                refused.append(
-                    {
-                        "label": action["label"],
-                        "kind": action["kind"],
-                        "reason": str(refusal),
-                        "fingerprint": page["fingerprint"],
-                        "node": action.get("node"),
-                        "choice": selected,
-                        "after": len(state["history"]),
-                        "pointer_moved": refusal.pointer_moved,
-                    }
-                )
-                if sum(r["after"] == len(state["history"]) for r in refused) >= self.stuck_after:
+                if self.refuse(shown, page, selected, str(refusal), refusal.pointer_moved):
                     return self.stop("blocked", "refused")
                 raise
             self.pending_text = None
@@ -321,14 +596,15 @@ class Agent:
             waited = outcome.get("wait") if isinstance(outcome, dict) else None
             state["history"].append(
                 {
-                    "step": len(state["history"]) + 1,
-                    "action": action["label"],
-                    "kind": action["kind"],
+                    "step": self.executed() + 1,
+                    "action": shown["label"],
+                    "kind": shown["kind"],
                     "choice": selected,
                     "probability": decision["probabilities"][selected],
                     "confidence": decision["confidence"],
                     "latency_ms": decision["latency_ms"],
-                    "text": text,
+                    "text": recorded,
+                    **({"text_source": source, "value_name": value_name} if source else {}),
                     "text_helper": helper["model"] if helper else None,
                     "text_latency_ms": helper["latency_ms"] if helper else 0,
                     "operation": decision["operation"],
@@ -342,7 +618,7 @@ class Agent:
                     **({"waited_ms": waited["waited_ms"], "met": waited["met"]} if waited else {}),
                 }
             )
-            state["page"] = state["browser"].observe(screenshot=self.screenshots)
+            state["page"] = self.observe()
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             state["history"][-1].update(
                 page_changed=state["page"]["fingerprint"] != page["fingerprint"],
@@ -365,8 +641,52 @@ class Agent:
                 )
                 else "ready"
             )
+            step, record = self.current_step()
+            watching = (
+                self.auto_complete
+                and step
+                and step.expect
+                and record["status"] == "active"
+                and all(e.cheap for e in step.expect)
+            )
+            if watching and not self.run_checks(True):
+                # Every check holds: no DONE decision (and no model call) is needed, once it holds again when settled.
+                unmet = self.stable()
+                if not unmet:
+                    self.complete_step()
+                elif not self.reject(unmet) and state["status"] == "blocked":
+                    self.end_step("blocked")
+            elif state["status"] == "blocked":
+                self.end_step("blocked")
         else:
             raise ValueError("Unknown command")
+        return self.snapshot()
+
+    def refuse(self, shown, page, selected, reason, pointer_moved=False):
+        """Record an action that was not executed and tell the model about it. True when stuck_after refusals in a row
+        (with nothing executed between) say the run should stop."""
+        state = self.state
+        refused = state.setdefault("refused", [])
+        del refused[:-49]
+        refused.append(
+            {
+                "label": shown["label"],
+                "kind": shown["kind"],
+                "reason": reason,
+                "fingerprint": page["fingerprint"],
+                "node": shown.get("node"),
+                "choice": selected,
+                "after": len(state["history"]),
+                "pointer_moved": pointer_moved,
+            }
+        )
+        return sum(r["after"] == len(state["history"]) for r in refused) >= self.stuck_after
+
+    def skip_field(self, shown, page, selected):
+        if self.refuse(shown, page, selected, "no declared value fits this field; nothing typed"):
+            return self.stop("blocked", "refused")
+        self.state["status"] = "ready"
+        self.state["elapsed_ms"] = self.now_ms()
         return self.snapshot()
 
     def model_calls(self):
@@ -376,6 +696,8 @@ class Agent:
         state = self.state
         state["status"] = status
         state["stop_reason"] = reason
+        if status != "failed":
+            self.end_step("blocked")
         state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
         return self.snapshot()
 

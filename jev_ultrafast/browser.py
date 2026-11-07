@@ -210,7 +210,10 @@ class Browser:
                 activity = (response or {}).get("result", {}).get("value")
             except (RuntimeError, TimeoutError):
                 pass
-            self.settle_after_action(activity)
+            try:
+                self.settle_after_action(activity)
+            finally:
+                self.action_mark = None
         for attempt in range(10):
             try:
                 return browser_operation(
@@ -258,6 +261,13 @@ class Browser:
         if not self.fresh(page, action):
             raise StalePage("Page changed since this decision. Observe again.")
         self.mark_action()
+        try:
+            return self.send(action, page, text)
+        except BaseException:
+            self.action_mark = None  # Nothing was sent that the next observation should settle after.
+            raise
+
+    def send(self, action, page, text):
         if action["kind"] in NAVIGATION:
             self.navigate(action)
             self.after_input = action
@@ -449,24 +459,36 @@ class Browser:
             spec["epoch"], spec["timers_since"] = timers_since["epoch"], timers_since["since"]
         return self._wait(spec, positive("timeout_ms", timeout_ms))
 
-    def element(self, role=None, name=None, state=None, present=True, timeout_ms=30000):
-        """An element with this role, accessible name (exact string or compiled regex) and state is visible anywhere
-        in the document (present=True), or no such element is (present=False)."""
+    def element_spec(self, role, name, state, present):
         if role is not None and not isinstance(role, str):
             raise ValueError("role must be a string")
         if type(present) is not bool:
             raise ValueError("present must be a boolean")
-        spec = self._spec(
+        return self._spec(
             "element", role=role, name=pattern("name", name, optional=True), state=element_state(state), present=present
         )
+
+    def text_spec(self, contains, present):
+        if type(present) is not bool:
+            raise ValueError("present must be a boolean")
+        return self._spec("text", contains=pattern("contains", contains), present=present)
+
+    def element(self, role=None, name=None, state=None, present=True, timeout_ms=30000):
+        """An element with this role, accessible name (exact string or compiled regex) and state is visible anywhere
+        in the document (present=True), or no such element is (present=False)."""
+        spec = self.element_spec(role, name, state, present)
         return self._wait(spec, positive("timeout_ms", timeout_ms))
 
     def text(self, contains, present=True, timeout_ms=30000):
         """The visible document text contains a string or regex (present=True), or no longer does (present=False)."""
-        if type(present) is not bool:
-            raise ValueError("present must be a boolean")
-        spec = self._spec("text", contains=pattern("contains", contains), present=present)
+        spec = self.text_spec(contains, present)
         return self._wait(spec, positive("timeout_ms", timeout_ms))
+
+    def probe(self, kind, timeout_ms=0, **args):
+        """An element or text condition for a step's checks: like element() / text(), but timeout_ms may be 0, which
+        reads the page once and returns at once."""
+        spec = (self.element_spec if kind == "element" else self.text_spec)(**args)
+        return self._wait(spec, non_negative("timeout_ms", timeout_ms))
 
     def text_stable(self, quiet_ms=500, role=None, name=None, timeout_ms=30000, require_text=None):
         """The visible text of the whole page, or of the element matched by role and name, is unchanged for quiet_ms.

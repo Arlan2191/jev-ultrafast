@@ -1,4 +1,5 @@
 {
+  "note": "Measured when Agent joined a list of goals into one goal. A list of strings is now one step per string (the model sees only the current step); '\n'.join(goals) as a single string reproduces the measured form. Numbers are not re-measured.",
   "task": "Google Flights: Z\u00fcrich to London, one way, 20 September 2026, 1 adult, economy",
   "initial_url": "https://www.google.com/travel/flights?hl=en",
   "final_url": "https://www.google.com/travel/flights/search?tfs=CBwQAhooEgoyMDI2LTA5LTIwagwIAxIIL20vMDg5NjZyDAgDEggvbS8wNGpwbEABSAFwAYIBCwj___________8BmAEC&hl=en",

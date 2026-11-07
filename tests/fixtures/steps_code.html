@@ -1,0 +1,5 @@
+<!doctype html><title>Code</title>
+<input type="text" aria-label="Access code" id="code" oninput="document.getElementById('echo').textContent = 'Code is ' + this.value">
+<p id="echo"></p>
+<button type="button" onclick="window.saved = document.getElementById('code').value">Save</button>
+<script>window.saved = null</script>

@@ -1,4 +1,5 @@
 {
+  "note": "Measured when Agent joined a list of goals into one goal. A list of strings is now one step per string (the model sees only the current step); '\n'.join(goals) as a single string reproduces the measured form. Numbers are not re-measured.",
   "date": "2026-09-16",
   "scope": "Three runs of one authored local fixture; not a general web evaluation.",
   "timing": "First decision request through final DONE, including execution, observations, screenshots. Excludes Chrome startup and initial page load.",
