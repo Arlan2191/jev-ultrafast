@@ -230,7 +230,7 @@ DRIFT = {
     "T": (["t2", "t2s", "save", "dialog-delete"], ["t1"]),
     "T2": (["t2s", "save", "dialog-delete"], []),
     "T3": (["t3b", "save", "dialog-delete"], ["t3a"]),
-    "U": (["ub", "save", "dialog-delete"], ["ua"]),
+    "U": (["save", "dialog-delete"], ["ua", "ub"]),  # ub: one Deal left of the two recorded, whichever it was
 }
 
 
