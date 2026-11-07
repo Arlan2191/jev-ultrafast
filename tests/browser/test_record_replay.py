@@ -716,8 +716,8 @@ def test_known_residual_a_test_id_moved_onto_a_look_alike_while_the_container_te
         replay=lab.trace(agent),
         heal=False,
     )
-    assert replayed["status"] == "done", replayed["stop_reason"]
-    assert lab.clicked(again) == ["beta"] and chooser.calls == []
+    # The goal's own check is what notices the wrong click here, not the resolver.
+    assert replayed["status"] == "diverged" and lab.clicked(again) == ["beta"] and chooser.calls == []
 
 
 def test_a_test_id_moved_onto_a_same_name_look_alike_is_a_refusal_that_heals(lab):
