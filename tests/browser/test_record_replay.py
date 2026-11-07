@@ -279,7 +279,7 @@ def test_a_press_that_an_optimistic_page_takes_back_is_not_done_under_replay(lab
         }
 
     chooser.forbid = False
-    agent, state, _model, _wall = lab.run(url="steps_toggle.html", goals=goals, chooser=chooser)
+    agent, state, _model, _wall = lab.run(url="steps_flaky.html?revert=100000", goals=goals, chooser=chooser)
     assert state["status"] == "done" and state["verified"]
     agent.close()
 
@@ -433,7 +433,7 @@ def test_a_rollback_from_a_setinterval_is_caught_by_the_full_window_only(lab):
     chooser = pick_chooser(
         lambda page, c: next(a["id"] for a in page["actions"] if a["kind"] == "click" and a["label"] == "Upvote")
     )
-    agent, state, _model, _wall = lab.run(url="steps_toggle.html", goals=goals, chooser=chooser)
+    agent, state, _model, _wall = lab.run(url="steps_interval.html?revert=100000", goals=goals, chooser=chooser)
     assert state["status"] == "done" and state["verified"]
     agent.close()
     chooser.forbid = True
@@ -564,7 +564,7 @@ def test_a_setinterval_rollback_is_not_seen_by_the_default_150_ms_window(lab):
     chooser = pick_chooser(
         lambda page, c: next(a["id"] for a in page["actions"] if a["kind"] == "click" and a["label"] == "Upvote")
     )
-    agent, state, _model, _wall = lab.run(url="steps_toggle.html", goals=goals, chooser=chooser)
+    agent, state, _model, _wall = lab.run(url="steps_interval.html?revert=100000", goals=goals, chooser=chooser)
     assert state["status"] == "done" and state["verified"]
     agent.close()
     chooser.forbid = True
