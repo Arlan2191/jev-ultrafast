@@ -110,6 +110,7 @@ class Browser:
         body_cap_ms=30000,
         wait_ignore_attributes=(),
         wait_interactive_grace_ms=2000,
+        on_target=None,
     ):
         self.wait_quiet_ms = non_negative("wait_quiet_ms", wait_quiet_ms)
         self.wait_timeout_ms = positive("wait_timeout_ms", wait_timeout_ms)
@@ -130,14 +131,15 @@ class Browser:
         self.reveal_timeout_ms = reveal_timeout_ms
         self.autocomplete_settle_ms = autocomplete_settle_ms
         ensure_daemon()
+        # Read only when something needs it: the window choice, or run evidence (which records the browser).
+        self.version = cdp("Browser.getVersion") if new_window is None or on_target else {}
         # In headless Chrome an owned tab in the existing window is a background tab: after a few clicks Chrome
         # throttles its frames to about 1 Hz and every pointer move then waits ~1 s for the next frame. A window of
         # its own stays at full rate. Headed Chrome was not measured and a new window is a visible one, so by default
         # (new_window=None) only a headless browser (HeadlessChrome in its product or user agent) gets it; True or
         # False force it.
         if new_window is None:
-            version = cdp("Browser.getVersion")
-            new_window = "HeadlessChrome" in f"{version.get('product', '')} {version.get('userAgent', '')}"
+            new_window = "HeadlessChrome" in f"{self.version.get('product', '')} {self.version.get('userAgent', '')}"
         self.new_window = bool(new_window)
         self.target = None
         try:
@@ -145,6 +147,8 @@ class Browser:
                 "Target.createTarget", url="about:blank", background=True, newWindow=self.new_window
             )["targetId"]
             self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
+            if on_target:
+                on_target(self.target)  # Before the first navigation, so the first load is also seen.
             self.call("Emulation.setDeviceMetricsOverride", width=1120, height=780, deviceScaleFactor=1, mobile=False)
             # Keep rAF/menus rendering in an owned background tab, without activating the user's Chrome tab.
             self.call("Emulation.setFocusEmulationEnabled", enabled=True)
@@ -170,6 +174,16 @@ class Browser:
         if response.get("exceptionDetails"):
             raise StalePage("Document changed during evaluation")
         return response.get("result", {}).get("value")
+
+    def screenshot(self):
+        return self.call("Page.captureScreenshot", format="jpeg", quality=72)["data"]
+
+    def locator(self, node):
+        """Where the observed element is, described to be found again on a fresh load (see a11y.js locator)."""
+        return self.evaluate(
+            "(() => { const {locator}=" + A11Y + f"; const e=window.__jevFast?.nodes.get({int(node)});"
+            " return e ? locator(e) : null; })()"
+        )
 
     def observe(self, screenshot=True):
         if getattr(self, "after_input", None):

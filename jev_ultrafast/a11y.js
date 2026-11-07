@@ -36,5 +36,57 @@
     }
     return null;
   };
-  return {visible, shown, name, roles, selector, role};
+  // A locator for one element: enough to find the same control again on a fresh load of the same page (see
+  // trace.jsonl "action" events). Nothing here reads a field value.
+  const unstableId = id => !id || /:[a-z0-9]+:|[«»]|^_r_/i.test(id) || /^ember\d+$/i.test(id) || /^\d+$/.test(id) ||
+    /[0-9a-f]{8,}/i.test(id) || /\d{5,}/.test(id) || /\s/.test(id);
+  const stableId = id => !unstableId(id);
+  const clip = text => (text||'').replace(/\s+/g,' ').trim().slice(0,80);
+  const implicit = {DIALOG:'dialog',FORM:'form',ARTICLE:'article',LI:'listitem',TR:'row',NAV:'navigation',
+    MAIN:'main',HEADER:'banner',SECTION:'region'};
+  const containers = 'dialog,[role="dialog"],[role="alertdialog"],form,article,li,tr,[role="row"],section,' +
+    '[role="region"],nav,[role="navigation"],main,[role="main"],header,[role="banner"]';
+  const scopeName = c => {
+    const given=name(c.hasAttribute('aria-labelledby') || c.hasAttribute('aria-label') ? c : null);
+    if (given) return clip(given);
+    if (['listitem','row','article'].includes(c.getAttribute('role') || implicit[c.tagName])) return clip(c.innerText);
+    return clip(c.querySelector('h1,h2,h3,h4,h5,h6,legend,[role="heading"]')?.innerText);
+  };
+  const locator = e => {
+    if (!e || !e.isConnected) return null;
+    let scope = null, container = null;
+    for (let c=e.parentElement?.closest(containers); c; c=c.parentElement?.closest(containers)) {
+      const crole=c.getAttribute('role') || implicit[c.tagName], cname=scopeName(c);
+      if (crole==='region' && !cname) continue;
+      container=c; scope={role:crole,name:cname}; break;
+    }
+    const mine = (root, rname, ename) => [...root.querySelectorAll(selector)]
+      .filter(c => role(c)===rname && name(c)===ename);
+    const rname=role(e), ename=name(e);
+    const inDocument = mine(document, rname, ename), inScope = container ? mine(container, rname, ename) : inDocument;
+    const path = [];
+    for (let n=e; n && n!==document.body && n!==document.documentElement; n=n.parentElement) {
+      if (n!==e && stableId(n.id)) { path.unshift(n.tagName.toLowerCase()+'#'+CSS.escape(n.id)); break; }
+      const same=[...(n.parentElement?.children||[])].filter(c => c.tagName===n.tagName);
+      path.unshift(n.tagName.toLowerCase()+':nth-of-type('+(same.indexOf(n)+1)+')');
+    }
+    if (!path[0]?.includes('#')) path.unshift('body');
+    const label = e.labels?.length ? clip(name(e.labels[0])) : null;
+    let href = null;
+    if (e.tagName==='A' && e.getAttribute('href')!==null) {
+      try { const u=new URL(e.href, location.href); href=u.pathname+u.search; } catch { href=null; }
+    }
+    const attr = ['data-testid','data-test','data-qa','data-cy'].map(a => e.getAttribute(a)).find(Boolean) ?? null;
+    const r=e.getBoundingClientRect();
+    return {
+      role: rname, name: clip(ename), tag: e.tagName.toLowerCase(), type: e.type ?? null,
+      href, label_for: label, placeholder: e.getAttribute('placeholder'), test_id: attr,
+      id: stableId(e.id) ? e.id : null, scope,
+      ordinal: {scope: inScope.indexOf(e), scope_count: inScope.length,
+        document: inDocument.indexOf(e), document_count: inDocument.length},
+      text: clip(e.innerText || e.textContent), css_path: path.join(' > '),
+      rect: {x:Math.round(r.x), y:Math.round(r.y), w:Math.round(r.width), h:Math.round(r.height)},
+    };
+  };
+  return {visible, shown, name, roles, selector, role, stableId, locator};
 })()
