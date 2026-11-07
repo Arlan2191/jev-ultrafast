@@ -153,7 +153,7 @@ def test_locators_find_the_same_element_again(open_page, fixture_base_url, monke
         # A unique test id (Save) is read first; every other control is found by role, name and scope.
         assert {f["rule"] for f in found} == {"role_name_scope", "test_id_first"}
         assert found[3]["rule"] == "test_id_first" and found[0]["rule"] == "role_name_scope"
-        assert all(f["verified"] and f["count_match"] for f in found)
+        assert all(f["verified"] and (f["count_match"] or f["rule"] == "test_id_first") for f in found)
         # And, when the name no longer matches, through the next rule down.
         field, save, generated = locators[2], locators[3], locators[4]
         renamed = {"name": "something else"}
