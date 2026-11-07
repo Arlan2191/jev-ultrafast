@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import statistics
 import threading
 import time
@@ -38,6 +39,11 @@ def decision(choice, operation, value=None):
 
 def lines(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines()]
+
+
+def without_images(path):
+    """The file's text without embedded screenshots (base64 can contain any three letters by chance)."""
+    return re.sub(r"data:image/jpeg;base64,[A-Za-z0-9+/=]*", "", Path(path).read_text())
 
 
 def threads():
@@ -181,7 +187,7 @@ def test_locators_find_the_same_element_again(open_page, fixture_base_url, monke
     # An undeclared token in a clicked link, a request URL or a console line is in no written file.
     for path in run.rglob("*"):
         if path.is_file() and path.suffix != ".jpg":
-            assert "zzz" not in path.read_text(), path.name
+            assert "zzz" not in without_images(path), path.name
 
 
 def test_urls_are_redacted_everywhere_the_run_wrote_them(open_page, fixture_base_url, monkeypatch, tmp_path):
@@ -203,7 +209,7 @@ def test_urls_are_redacted_everywhere_the_run_wrote_them(open_page, fixture_base
         agent.close()
     for path in run.rglob("*"):
         if path.is_file() and path.suffix != ".jpg":
-            assert "zzz" not in path.read_text(), path.name
+            assert "zzz" not in without_images(path), path.name
     urls = [n["url"] for n in lines(run / "network.jsonl")]
     page = f"{fixture_base_url}/evidence.html?session=<redacted>"
     assert page in urls and f"{fixture_base_url}/api/1?token=<redacted>" in urls
