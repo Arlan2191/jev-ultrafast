@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Viewport page</title>
+<style>
+  body { margin: 0; font-family: sans-serif; }
+  #sidebar { display: none; }
+  #menu { display: block; }
+  @media (min-width: 1300px) {
+    #sidebar { display: block; }
+    #menu { display: none; }
+  }
+  .spacer { height: 3000px; background: linear-gradient(#fff, #ccc); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Responsive page</h1>
+  <button id="menu">Open menu</button>
+  <nav id="sidebar"><a href="#reports">Quarterly reports</a></nav>
+  <div class="spacer"></div>
+</main>
+</body>
+</html>

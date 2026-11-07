@@ -25,6 +25,26 @@ def non_negative(name, value):
     return value
 
 
+DEFAULT_VIEWPORT = (1120, 780)
+MAX_VIEWPORT = (7680, 4320)
+
+
+def viewport_size(value):
+    """A (width, height) pair of positive ints, at most 7680x4320, as a tuple."""
+    if (
+        not isinstance(value, (tuple, list))
+        or len(value) != 2
+        or any(type(side) is not int for side in value)
+    ):
+        raise ValueError("viewport must be a (width, height) pair of integers")
+    width, height = value
+    if width < 1 or height < 1:
+        raise ValueError("viewport width and height must be positive")
+    if width > MAX_VIEWPORT[0] or height > MAX_VIEWPORT[1]:
+        raise ValueError(f"viewport must be at most {MAX_VIEWPORT[0]}x{MAX_VIEWPORT[1]}")
+    return (width, height)
+
+
 def positive(name, value):
     if type(value) is not int or value < 1:
         raise ValueError(f"{name} must be a positive integer")
