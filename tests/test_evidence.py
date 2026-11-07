@@ -330,6 +330,21 @@ def test_the_stable_id_heuristic():
     assert dict(zip(ids, json.loads(out.stdout), strict=True)) == ids
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_a11y_exports_the_helpers_resolve_and_the_browser_share():
+    # Browser.resolve returns text through textOf (blank for editable fields); the fallbacks read the locator's
+    # test_id_unique / id_unique. The behavior itself is pinned in tests/browser/test_run_evidence.py (DRIFT T..U).
+    script = (
+        "const a=eval(require('fs').readFileSync(process.argv[1],'utf8'));"
+        "console.log(JSON.stringify(['textOf','resolve','locator'].map(k => typeof a[k])))"
+    )
+    path = str(Path(loop.__file__).with_name("a11y.js"))
+    out = subprocess.run(["node", "-e", script, path], capture_output=True, text=True, check=True)
+    assert json.loads(out.stdout) == ["function"] * 3
+    source = Path(loop.__file__).with_name("a11y.js").read_text()
+    assert "test_id_unique" in source and "id_unique" in source
+
+
 def test_a_locator_is_only_read_for_elements_and_never_for_a_key_or_a_wait(monkeypatch, tmp_path):
     agent = make(monkeypatch, tmp_path, keys=("Control+K",))
     key = {"id": "key:Control+K", "kind": "key", "key": "Control+K", "name": "Control+K", "label": "Press Control+K"}

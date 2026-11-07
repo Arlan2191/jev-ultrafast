@@ -196,10 +196,10 @@ class Browser:
         something: hint is its {tag, text}, it is not the element, show it or ignore it). An element is returned only
         if its tag, type, role, name and text still match."""
         found = self.evaluate(
-            "(() => { const {resolve}=" + A11Y + f"; const r=resolve({json.dumps(locator)});"
+            "(() => { const {resolve, textOf}=" + A11Y + f"; const r=resolve({json.dumps(locator)});"
             " return {rule:r.rule, unique:r.unique, count_match:r.count_match, verified:r.verified,"
             " hint:r.hint ?? null, tag:r.element ? r.element.tagName.toLowerCase() : null,"
-            " text:r.element ? (r.element.innerText||'').slice(0,80) : null}; })()"
+            " text:r.element ? textOf(r.element) : null}; })()"
         )
         return found if found["rule"] else None
 

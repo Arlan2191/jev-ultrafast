@@ -87,6 +87,10 @@
       (rname!==null || (c.tagName.toLowerCase()===tag && (c.type ?? null)===type)));
   const textOf = e => e.isContentEditable || e.tagName==='SELECT' || e.tagName==='TEXTAREA' ? '' :
     clip(e.innerText || e.textContent);
+  const TEST_ATTRS = ['data-testid','data-test','data-qa','data-cy'];
+  const withTestId = v => [...document.querySelectorAll(TEST_ATTRS.map(a => '['+a+']').join(','))]
+    .filter(c => TEST_ATTRS.some(a => c.getAttribute(a)===v));
+  const withId = v => document.querySelectorAll('#'+CSS.escape(v)).length;
   const cssPath = e => {
     const path = [];
     for (let n=e; n && n!==document.body && n!==document.documentElement; n=n.parentElement) {
@@ -130,12 +134,13 @@
       scope={...scope, ordinal:like.indexOf(container), count:like.length, css_path:cssPath(container)};
     }
     const label = e.labels?.length ? clip(name(e.labels[0])) : null;
-    const attr = ['data-testid','data-test','data-qa','data-cy'].map(a => e.getAttribute(a)).find(Boolean) ?? null;
+    const attr = TEST_ATTRS.map(a => e.getAttribute(a)).find(Boolean) ?? null;
     const r=e.getBoundingClientRect();
     return {
       role: rname, name: ename, tag, type,
       href: linkOf(e, full), label_for: label, placeholder: e.getAttribute('placeholder'), test_id: attr,
-      id: anchorId(e.id) ? e.id : null, scope,
+      test_id_unique: attr ? withTestId(attr).length===1 : null,
+      id: anchorId(e.id) ? e.id : null, id_unique: anchorId(e.id) ? withId(e.id)===1 : null, scope,
       ordinal: {scope: inScope.indexOf(e), scope_count: inScope.length,
         document: inDocument.indexOf(e), document_count: inDocument.length},
       text: textOf(e), css_path: cssPath(e),
@@ -151,7 +156,8 @@
   // {element, rule, unique, count_match, verified}. The primary rule (role_name_scope) takes the role + name matches
   // inside the scope (itself found by role + name + ordinal) and accepts one only when the recorded in-scope count
   // (and, with a scope, the recorded scope count) equals the current one; otherwise it refuses with rule "ambiguous".
-  // Then test_id and a unique stable id, each accepted only if `verifies`. css_path is never a resolution: it comes
+  // Then test_id and a unique stable id, each accepted only if `verifies`, unique then and now, and not under a
+  // scope that had siblings of its kind (its count was 1 or there was no scope). css_path is never a resolution: it comes
   // back as {element:null, rule:'hint', hint:{tag,text}} for the caller to show or ignore.
   const resolve = loc => {
     const none = (rule=null) => ({element:null, rule, unique:false, count_match:false, verified:false});
@@ -173,16 +179,19 @@
         if (verifies(element, loc)) return {element, rule:'role_name_scope', unique, count_match, verified:true};
       }
     }
-    const fallback = (element, rule, unique) => verifies(element, loc) ?
-      {element, rule, unique, count_match:null, verified:true} : null;
+    // A fallback can only be trusted to be the same element when it is unique now and was unique when recorded,
+    // and the recorded scope (if any) was the only one of its kind: otherwise a sibling scope's control with the
+    // same test id or id would pass `verifies`.
+    const fallbackOk = !loc.scope || loc.scope.count===1;
+    const fallback = (element, rule, recordedUnique) => fallbackOk && recordedUnique===true && verifies(element, loc) ?
+      {element, rule, unique:true, count_match:null, verified:true} : null;
     if (loc.test_id) {
-      const hits=[...document.querySelectorAll('[data-testid],[data-test],[data-qa],[data-cy]')].filter(
-        c => ['data-testid','data-test','data-qa','data-cy'].some(a => c.getAttribute(a)===loc.test_id));
-      const hit = hits.length===1 ? fallback(hits[0], 'test_id', true) : null;
+      const hits = withTestId(loc.test_id);
+      const hit = hits.length===1 ? fallback(hits[0], 'test_id', loc.test_id_unique) : null;
       if (hit) return hit;
     }
     if (loc.id && anchorId(loc.id)) {
-      const hit = fallback(document.getElementById(loc.id), 'id', true);
+      const hit = withId(loc.id)===1 ? fallback(document.getElementById(loc.id), 'id', loc.id_unique) : null;
       if (hit) return hit;
     }
     if (loc.css_path) {
@@ -193,5 +202,5 @@
     }
     return none();
   };
-  return {visible, shown, name, roles, selector, role, stableId, locator, resolve};
+  return {visible, shown, name, roles, selector, role, stableId, textOf, locator, resolve};
 })()

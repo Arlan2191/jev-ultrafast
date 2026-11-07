@@ -226,6 +226,11 @@ DRIFT = {
     "M": (["ma", "save", "dialog-delete"], ["mb"]),
     "N": (["mb", "save", "dialog-delete"], ["ma"]),
     "Q": (["q2", "save", "dialog-delete"], ["q1"]),
+    # Round 4: a fallback never leaves the recorded scope. T, T3, U: the target is gone, a sibling has the same key.
+    "T": (["t2", "t2s", "save", "dialog-delete"], ["t1"]),
+    "T2": (["t2s", "save", "dialog-delete"], []),
+    "T3": (["t3b", "save", "dialog-delete"], ["t3a"]),
+    "U": (["ub", "save", "dialog-delete"], ["ua"]),
 }
 
 
@@ -239,6 +244,9 @@ def test_a_drifted_page_never_resolves_to_another_element(open_page, fixture_bas
     )
     assert {"secret", "icon2", "row2-remove", "pay", "edit", "submit", "twin2"} <= set(recorded)
     assert {"a1", "e1", "g1", "h1", "o", "p", "ma", "mb", "q1", "q2"} <= set(recorded)
+    assert {"t1", "t2", "t2s", "t3a", "t3b", "ua", "ub", "note"} <= set(recorded)
+    assert recorded["t1"]["test_id_unique"] is False and recorded["t2s"]["test_id_unique"] is True
+    assert recorded["ua"]["id_unique"] is True and recorded["ub"]["id_unique"] is None
     assert recorded["secret"]["role"] is None and recorded["secret"]["type"] == "password"
     assert "hidden-delete" not in recorded
     for variant, (kept, refused) in DRIFT.items():
@@ -259,6 +267,15 @@ def test_a_drifted_page_never_resolves_to_another_element(open_page, fixture_bas
         "rule": "ambiguous", "unique": False, "count_match": False, "verified": False, "tag": None, "text": None,
         "hint": None,
     }
+    # T2 is the case the fallback is for: the scope was renamed, the test id is unique and the scope count was 1.
+    browser.navigate({"kind": "goto", "url": f"{fixture_base_url}/locators.html?variant=T2"})
+    assert browser.resolve(recorded["t2s"])["rule"] == "test_id"
+    # The contents of an editable element are not returned, as they are not recorded.
+    browser.navigate({"kind": "goto", "url": f"{fixture_base_url}/locators.html"})
+    assert recorded["note"]["text"] == ""
+    note = browser.resolve(recorded["note"])
+    assert note["rule"] == "role_name_scope" and note["text"] == ""
+    assert "secret-value-123" not in json.dumps(note)
     # A position is only a hint: M renamed the target, and css_path now points at another button, which is not returned.
     browser.navigate({"kind": "goto", "url": f"{fixture_base_url}/locators.html?variant=M"})
     assert browser.resolve(recorded["mb"]) == {

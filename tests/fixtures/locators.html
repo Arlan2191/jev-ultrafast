@@ -74,6 +74,23 @@
     <input type="checkbox" aria-label="Agree" data-m="q1">
     <input type="checkbox" aria-label="Newsletter" data-m="q2">
   </div>
+  <!-- Reviewer probes (round 4): a fallback (test id, id) must not leave its recorded scope. -->
+  <div id="pt">
+    <section aria-label="Plan A"><button data-testid="choose-t" data-m="t1">Choose</button></section>
+    <section aria-label="Plan B"><button data-testid="choose-t" data-m="t2">Choose</button></section>
+  </div>
+  <section aria-label="Solo old"><button data-testid="pick-t2" data-m="t2s">Pick</button></section>
+  <ul id="pt3">
+    <li><span>Ann</span> <button data-testid="del-t3" data-m="t3a">Delete</button></li>
+    <li><span>Bob</span> <button data-testid="del-t3" data-m="t3b">Delete</button></li>
+  </ul>
+  <div id="pu">
+    <section aria-label="Deal A"><button id="take-now" data-m="ua">Take</button></section>
+    <section aria-label="Deal B"><button data-m="ub">Take</button></section>
+  </div>
+  <div id="pr">
+    <div contenteditable="true" role="textbox" aria-label="Note" data-m="note">secret-value-123</div>
+  </div>
   <p id="status">idle</p>
 </main>
 <script>
@@ -134,6 +151,17 @@
     if (variant === 'N') at('ma').remove();
     // Q: a checkbox (no text) is renamed in place.
     if (variant === 'Q') at('q1').setAttribute('aria-label', 'Consent');
+    // T: Plan A goes; Plan B's button has the same (shared) test id.
+    if (variant === 'T') drop('t1');
+    // T2: the only scope is renamed; the button, its test id (unique) and its name are unchanged.
+    if (variant === 'T2') document.querySelector('[aria-label="Solo old"]').setAttribute('aria-label', 'Solo new');
+    // T3: Ann's row goes; Bob's Delete has the same (shared) test id.
+    if (variant === 'T3') drop('t3a');
+    // U: Deal A goes and its stable id moves to Deal B's button.
+    if (variant === 'U') {
+      drop('ua');
+      at('ub').id = 'take-now';
+    }
   }
   document.addEventListener('click', event => {
     document.getElementById('status').textContent = 'clicked ' + (event.target.textContent || '').trim();
