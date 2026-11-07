@@ -178,11 +178,21 @@ class Browser:
     def screenshot(self):
         return self.call("Page.captureScreenshot", format="jpeg", quality=72)["data"]
 
-    def locator(self, node):
-        """Where the observed element is, described to be found again on a fresh load (see a11y.js locator)."""
+    def locator(self, node, full_urls=False):
+        """Where the observed element is, described to be found again on a fresh load (see a11y.js locator). A link's
+        href has its query values and fragment replaced by <redacted> unless full_urls."""
         return self.evaluate(
             "(() => { const {locator}=" + A11Y + f"; const e=window.__jevFast?.nodes.get({int(node)});"
-            " return e ? locator(e) : null; })()"
+            f" return e ? locator(e, {'true' if full_urls else 'false'}) : null; }})()"
+        )
+
+    def resolve(self, locator):
+        """The element a recorded locator points at on the page as it is now: {"rule", "tag", "marker", "text"} (marker
+        is its data-m attribute, for tests), or None. rule is role_name_scope, test_id, id or css_path (a11y.js)."""
+        return self.evaluate(
+            "(() => { const {resolve}=" + A11Y + f"; const r=resolve({json.dumps(locator)});"
+            " return r.element ? {rule:r.rule, tag:r.element.tagName.toLowerCase(),"
+            " marker:r.element.getAttribute('data-m'), text:(r.element.innerText||'').slice(0,80)} : null; })()"
         )
 
     def observe(self, screenshot=True):

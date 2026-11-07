@@ -279,7 +279,7 @@ def test_no_written_file_but_the_screenshots_holds_a_declared_secret(monkeypatch
         )
         stream.handle(
             {"sessionId": "S1", "method": "Network.requestWillBeSent",
-             "params": {"requestId": form, "request": {"url": f"https://example.test/?q={form}", "method": "GET"},
+             "params": {"requestId": form, "request": {"url": f"https://example.test/p/{form}", "method": "GET"},
                         "type": "Fetch", "timestamp": 1.0, "wallTime": 1.0}}
         )
     do(agent, "e1", "TYPE_TEXT", value="pw")
@@ -313,9 +313,14 @@ def test_the_stable_id_heuristic():
         "console.log(JSON.stringify(JSON.parse(process.argv[2]).map(a.stableId)))"
     )
     ids = {
-        "save": True, "email-field": True, "main-nav": True, "item-3": True, "SubmitButton": True,
+        "save": True, "email-field": True, "main-nav": True, "item-3": False, "SubmitButton": True,
         "": False, ":r1:": False, "radix-:r2:": False, "«r1»": False, "_r_3_": False, "ember123": False,
-        "ember": True, "12345": False, "7": False, "a1b2c3d4e5": False, "550e8400-e29b-41d4-a716-446655440000": False,
+        "ember": True, "12345": False,
+        # Counter-generated ids that frameworks produce most.
+        "mat-input-3": False, "cdk-overlay-12": False, "react-select-2-input": False, "radix-0": False,
+        "downshift-1-input": False, "ui-id-4": False, "rc_select_0": False, "gwt-uid-5": False, "mui-12": False,
+        "input-1": False, "item-3.2": False, "email-v2-field": True, "step2": True, "h1-title": True,
+        "7": False, "a1b2c3d4e5": False, "550e8400-e29b-41d4-a716-446655440000": False,
         "input-84729": False, "has space": False,
     }
     out = subprocess.run(
@@ -473,7 +478,9 @@ def test_the_connection_attaches_to_its_own_target_enables_domains_and_collects_
         assert got == ("POST", 404, "text/html", 77)
         assert first["ttfb_ms"] == 5.5 and first["duration_ms"] == 250.0 and first["failure"] is None
         assert second["status"] is None and second["failure"] == "net::ERR_NAME_NOT_RESOLVED"
-        assert dropped == {"console": 0, "network": 0}
+        assert dropped == {"console": 0, "network": 0, "errors": 0}
+        assert stream.lost() is None
+        assert socket.sent[3]["params"] == evidence_module.BUFFERS  # Network.enable keeps no response bodies.
         assert not any(k.startswith("_") for row in network for k in row)
     finally:
         stream.close()
@@ -484,9 +491,9 @@ def test_the_connection_attaches_to_its_own_target_enables_domains_and_collects_
 THREAD_NAME = evidence_module.THREAD
 
 
-def test_a_redirect_is_two_records_and_buffers_are_bounded():
+def test_a_redirect_is_two_records():
     socket = ScriptedSocket()
-    stream = CdpEvents("ws://browser", "T", connect=lambda *_a, **_k: socket, limit=3)
+    stream = CdpEvents("ws://browser", "T", connect=lambda *_a, **_k: socket)
     stream.start()
     try:
         for message in (
@@ -495,17 +502,21 @@ def test_a_redirect_is_two_records_and_buffers_are_bounded():
             event("Network.requestWillBeSent", requestId="r", type="Document", timestamp=1.1, wallTime=1.7e9,
                   request={"url": "https://example.test/b", "method": "GET"},
                   redirectResponse={"status": 302, "mimeType": "text/html"}),
-            *[event("Runtime.consoleAPICalled", type="log", args=[{"type": "string", "value": str(i)}])
-              for i in range(5)],
         ):
             socket.push(message)
-        time.sleep(0.4)
-        console, network, dropped = stream.snapshot()
+        settle(stream, lambda: len(stream.snapshot()[1]) == 2)
+        network = stream.snapshot()[1]
     finally:
         stream.close()
     got = [(n["url"][-1], n["status"], n.get("redirected_to", "")[-1:]) for n in network]
     assert got == [("a", 302, "b"), ("b", None, "")]
-    assert len(console) == 3 and dropped["console"] == 2
+
+
+def settle(stream, done, seconds=3):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and not done():
+        time.sleep(0.01)
+    time.sleep(0.05)
 
 
 def test_a_failed_handshake_leaves_no_thread_or_open_socket():
@@ -595,3 +606,353 @@ def test_every_event_and_the_report_pass_through_the_scrub_given_to_evidence(tmp
     assert "TOPSECRET" not in (tmp_path / "e" / "trace.jsonl").read_text()
     assert "<x>" in (tmp_path / "e" / "trace.jsonl").read_text()
     assert "TOPSECRET" not in (tmp_path / "e" / "report.html").read_text()
+
+
+# --- fix round 1: URLs, lost capture, bounds, locator errors, report ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://example.test/verify?token=zzz&state=abc#access_token=q",
+         "https://example.test/verify?token=<redacted>&state=<redacted>#<redacted>"),
+        ("https://example.test/a/b", "https://example.test/a/b"),
+        ("/verify?token=zzz", "/verify?token=<redacted>"),
+        ("https://example.test/?abc123", "https://example.test/?<redacted>"),
+        ("https://example.test/?a=1&a=2&b", "https://example.test/?a=<redacted>&a=<redacted>&<redacted>"),
+        ("https://user:pw@example.test:8080/x?k=v", "https://example.test:8080/x?k=<redacted>"),
+        ("data:image/png;base64,AAAA", "data:image/png"),
+        ("data:,secret", "data:"),
+        ("blob:https://example.test/0b1c", "blob:"),
+        ("/a//b@c?x=1", "/a//b@c?x=<redacted>"),
+        ("about:blank", "about:blank"),
+    ],
+)
+def test_redact_url_keeps_origin_path_and_query_keys_only(url, expected):
+    assert evidence_module.redact_url(url) == expected
+    assert evidence_module.redact_url(expected) == expected  # Idempotent: every layer may apply it.
+
+
+def test_redact_text_redacts_each_url_inside_a_message():
+    text = "GET https://example.test/cb?code=zzz failed; see data:image/png;base64,AAAA and metadata:keep"
+    out = evidence_module.redact_text(text)
+    assert "zzz" not in out and "AAAA" not in out
+    assert out == "GET https://example.test/cb?code=<redacted> failed; see data:image/png and metadata:keep"
+
+
+def test_an_undeclared_token_in_a_url_is_in_no_written_file(monkeypatch, tmp_path):
+    agent = make(monkeypatch, tmp_path, "open it")
+    agent.fake.pages = [{**page(), "url": "https://example.test/verify?token=zzz#frag-zzz"}]
+    agent.fake.pages.append({**page(text="next"), "url": "https://example.test/done?session=zzz"})
+    agent.state["page"] = agent.fake.pages[0]
+    agent.fake.browser.locator.return_value = {**LOCATOR, "href": "/verify?token=zzz"}  # The page-side half is a11y.js.
+    socket = ScriptedSocket()
+    stream = CdpEvents("ws://x", "t", connect=lambda *_a, **_k: socket)
+    stream.start()
+    agent.evidence.stream, agent.evidence.capture = stream, {"console": True, "network": True, "reason": None}
+    stream.handle(event("Network.requestWillBeSent", requestId="1", type="Document", timestamp=1.0, wallTime=1.0,
+                        request={"url": "https://example.test/verify?token=zzz#frag-zzz", "method": "GET"}))
+    stream.handle(event("Network.requestWillBeSent", requestId="1", type="Document", timestamp=1.1, wallTime=1.0,
+                        request={"url": "https://example.test/next?code=zzz", "method": "GET"},
+                        redirectResponse={"status": 302}))
+    stream.handle(event("Network.loadingFailed", requestId="1", timestamp=1.2, errorText="net::ERR_FAILED"))
+    stream.handle(event("Runtime.consoleAPICalled", type="log", args=[
+        {"type": "string", "value": "at https://example.test/x?token=zzz"}],
+        stackTrace={"callFrames": [{"url": "https://example.test/app.js?v=zzz", "lineNumber": 0}]}))
+    stream.handle(event("Log.entryAdded", entry={"source": "network", "level": "error", "text": "Failed",
+                                                 "url": "https://example.test/img?sig=zzz"}))
+    stream.handle(event("Runtime.exceptionThrown", exceptionDetails={
+        "text": "Uncaught", "url": "https://example.test/boot.js?auth=zzz",
+        "exception": {"description": "Error: bad https://example.test/a?token=zzz"}}))
+    do(agent, "e3", "CLICK")
+    do(agent)
+    agent.close()
+    files = [p for p in (tmp_path / "run").rglob("*") if p.is_file() and p.suffix != ".jpg"]
+    assert {p.name for p in files} >= {"trace.jsonl", "console.jsonl", "network.jsonl", "network.har", "report.html"}
+    for path in files:
+        assert "zzz" not in path.read_text(), path.name
+    network = read(tmp_path / "run" / "network.jsonl")
+    assert network[0]["url"] == "https://example.test/verify?token=<redacted>#<redacted>"
+    assert network[0]["redirected_to"] == "https://example.test/next?code=<redacted>"
+    har = json.loads((tmp_path / "run" / "network.har").read_text())
+    assert har["log"]["entries"][0]["request"]["queryString"] == [{"name": "token", "value": "<redacted>"}]
+    observed = [e["url"] for e in read(tmp_path / "run" / "trace.jsonl") if e["type"] == "observe"]
+    assert "https://example.test/done?session=<redacted>" in observed
+
+
+def test_evidence_urls_full_opts_out_and_a_bad_mode_is_refused(monkeypatch, tmp_path):
+    agent = make(monkeypatch, tmp_path, evidence_urls="full")
+    agent.fake.pages = [{**page(), "url": "https://example.test/verify?token=zzz"}]
+    agent.state["page"] = agent.fake.pages[0]
+    agent.trace_observe(agent.state["page"])
+    do(agent)
+    agent.close()
+    assert "token=zzz" in (tmp_path / "run" / "trace.jsonl").read_text()
+    agent.fake.browser.locator.assert_not_called()
+    with pytest.raises(ValueError, match="evidence_urls"):
+        make(monkeypatch, tmp_path / "other", evidence_urls="partial")
+
+
+def test_the_locator_is_read_with_the_url_mode(monkeypatch, tmp_path):
+    agent = make(monkeypatch, tmp_path)
+    do(agent, "e3", "CLICK")
+    agent.fake.browser.locator.assert_called_with(20, full_urls=False)
+    agent.close()
+    agent = make(monkeypatch, tmp_path / "full", evidence_urls="full")
+    do(agent, "e3", "CLICK")
+    agent.fake.browser.locator.assert_called_with(20, full_urls=True)
+    agent.close()
+
+
+def test_evidence_capture_false_opens_no_second_connection(monkeypatch, tmp_path):
+    agent = make(monkeypatch, tmp_path, evidence_capture=False)
+    agent.evidence.attach("T", environ={"BU_CDP_WS": "ws://x"}, events=lambda *_a, **_k: pytest.fail("connected"))
+    assert agent.evidence.capture == {"console": False, "network": False, "reason": "evidence_capture=False"}
+    do(agent, "e3", "CLICK")
+    do(agent)
+    agent.close()
+    assert agent.evidence.stream is None and agent.state["history"][0]["locator"] == LOCATOR
+    assert "Console was not captured: evidence_capture=False" in (tmp_path / "run" / "report.html").read_text()
+    with pytest.raises(ValueError, match="evidence_capture"):
+        make(monkeypatch, tmp_path / "other", evidence_capture="no")
+
+
+def test_a_connection_that_dies_mid_run_is_recorded_not_reported_as_a_clean_page(monkeypatch, tmp_path):
+    agent = make(monkeypatch, tmp_path)
+    socket = ScriptedSocket()
+    agent.evidence.attach("T", environ={"BU_CDP_WS": "ws://x"}, events=lambda *a, **k: CdpEvents(
+        *a, connect=lambda *_a, **_k: socket, **k))
+    time.sleep(0.05)
+    socket.closed = True  # The tab crashed.
+    settle(agent.evidence.stream, lambda: agent.evidence.stream.lost() is not None)
+    assert agent.evidence.lost()["reason"] == "ConnectionError"
+    do(agent)
+    agent.close()
+    end = read(tmp_path / "run" / "trace.jsonl")[-1]
+    assert end["capture_lost"]["reason"] == "ConnectionError" and end["capture_lost"]["t_ms"] >= 0
+    page_text = (tmp_path / "run" / "report.html").read_text()
+    assert "capture ended at" in page_text and "ConnectionError" in page_text
+
+
+def test_a_normal_close_is_not_a_lost_capture(monkeypatch, tmp_path):
+    agent = make(monkeypatch, tmp_path)
+    agent.evidence.attach("T", environ={"BU_CDP_WS": "ws://x"}, events=lambda *a, **k: CdpEvents(
+        *a, connect=lambda *_a, **_k: ScriptedSocket(), **k))
+    do(agent)
+    agent.close()
+    end = read(tmp_path / "run" / "trace.jsonl")[-1]
+    assert end["capture_lost"] is None and "capture ended" not in (tmp_path / "run" / "report.html").read_text()
+
+
+def test_events_that_cannot_be_read_are_counted(monkeypatch, tmp_path):
+    socket = ScriptedSocket()
+    stream = CdpEvents("ws://x", "T", connect=lambda *_a, **_k: socket)
+    stream.start()
+    try:
+        socket.push(event("Network.requestWillBeSent", requestId="1"))  # No request: the handler raises.
+        socket.push("not json")
+        socket.push(event("Runtime.consoleAPICalled", type="log", args=[{"type": "string", "value": "still here"}]))
+        settle(stream, lambda: stream.snapshot()[0])
+        console, _network, dropped = stream.snapshot()
+    finally:
+        stream.close()
+    assert [c["text"] for c in console] == ["still here"] and dropped["errors"] == 2
+
+
+def test_run_end_dropped_is_taken_after_the_connection_closed(monkeypatch, tmp_path):
+    agent = make(monkeypatch, tmp_path)
+    socket = ScriptedSocket()
+    agent.evidence.attach("T", environ={"BU_CDP_WS": "ws://x"}, events=lambda *a, **k: CdpEvents(
+        *a, connect=lambda *_a, **_k: socket, head=1, tail=1, reserved=1, **k))
+    do(agent)  # run_end is written here ...
+    for i in range(4):  # ... and more arrives before close().
+        socket.push(event("Runtime.consoleAPICalled", type="log", args=[{"type": "string", "value": str(i)}]))
+    settle(agent.evidence.stream, lambda: socket.incoming == [])
+    agent.close()
+    end = read(tmp_path / "run" / "trace.jsonl")[-1]
+    assert end["type"] == "run_end" and end["dropped"] == {"console": 2, "network": 0, "errors": 0}
+    assert "between the first" in end["dropped_part"]
+    assert [c["text"] for c in read(tmp_path / "run" / "console.jsonl")] == ["0", "3"]
+
+
+def test_past_the_cap_the_first_the_last_and_every_error_are_kept():
+    socket = ScriptedSocket()
+    stream = CdpEvents("ws://x", "T", connect=lambda *_a, **_k: socket, head=2, tail=2, reserved=2)
+    stream.start()
+    try:
+        for i in range(10):
+            socket.push(event("Runtime.consoleAPICalled", type="error" if i in (4, 5, 6) else "log",
+                              args=[{"type": "string", "value": f"m{i}"}]))
+        socket.push(event("Runtime.exceptionThrown",
+                          exceptionDetails={"text": "late", "exception": {"description": "E: late"}}))
+        for i in range(10, 14):  # Noise after the errors must not push them out of the reserved ring.
+            socket.push(event("Runtime.consoleAPICalled", type="log", args=[{"type": "string", "value": f"m{i}"}]))
+        settle(stream, lambda: socket.incoming == [])
+        console, _network, dropped = stream.snapshot()
+    finally:
+        stream.close()
+    # head m0 m1; tail m12 m13; reserved ring keeps the last two errors (m6 and the exception).
+    assert [c["text"] for c in console] == ["m0", "m1", "m6", "E: late", "m12", "m13"]
+    assert dropped["console"] == 15 - 6
+
+
+def test_network_failures_outlive_the_tail_ring():
+    socket = ScriptedSocket()
+    stream = CdpEvents("ws://x", "T", connect=lambda *_a, **_k: socket, head=1, tail=2, reserved=5)
+    stream.start()
+    try:
+        for i in range(8):
+            socket.push(event("Network.requestWillBeSent", requestId=str(i), type="Fetch", timestamp=1.0, wallTime=1.0,
+                              request={"url": f"https://example.test/{i}", "method": "GET"}))
+            if i == 3:
+                socket.push(event("Network.responseReceived", requestId="3", type="Fetch", response={"status": 404}))
+        settle(stream, lambda: socket.incoming == [])
+        _console, network, dropped = stream.snapshot()
+    finally:
+        stream.close()
+    assert [n["url"][-1] for n in network] == ["0", "3", "6", "7"] and dropped["network"] == 4
+    assert len(stream.requests) <= 3  # Records that fell out of the ring are no longer tracked.
+
+
+def test_fields_are_clipped_with_a_truncated_flag_and_frames_have_a_ceiling():
+    socket = ScriptedSocket()
+    seen = {}
+    stream = CdpEvents("ws://x", "T", connect=lambda url, **kw: seen.update(kw) or socket)
+    stream.start()
+    try:
+        huge = "x" * 50_000
+        socket.push(event("Runtime.consoleAPICalled", type="log", args=[{"type": "string", "value": huge}]))
+        socket.push(event("Runtime.exceptionThrown", exceptionDetails={"exception": {"description": "E: " + huge}}))
+        socket.push(event("Network.requestWillBeSent", requestId="1", type="Fetch", timestamp=1.0, wallTime=1.0,
+                          request={"url": "https://example.test/" + huge, "method": "GET"}))
+        settle(stream, lambda: len(stream.snapshot()[1]) == 1 and len(stream.snapshot()[0]) == 2)
+        console, network, _dropped = stream.snapshot()
+    finally:
+        stream.close()
+    limits = evidence_module.CLIP
+    assert len(console[0]["text"]) == limits["text"] and console[0]["truncated"] == ["text"]
+    assert len(console[1]["stack"]) == limits["stack"] and "stack" in console[1]["truncated"]
+    assert len(network[0]["url"]) == limits["url"] and network[0]["truncated"] == ["url"]
+    assert 0 < seen["max_size"] <= 16 * 1024 * 1024
+
+
+def test_network_enable_falls_back_when_the_buffer_parameters_are_unknown():
+    class Picky(ScriptedSocket):
+        def send(self, text):
+            message = json.loads(text)
+            self.sent.append(message)
+            if message["method"] == "Network.enable" and message["params"]:
+                reply = {"id": message["id"], "error": {"message": "invalid params"}}
+            else:
+                reply = {"id": message["id"], "result": {"sessionId": "S1"}}
+            with self.lock:
+                self.incoming.append(json.dumps(reply))
+
+    socket = Picky()
+    stream = CdpEvents("ws://x", "T", connect=lambda *_a, **_k: socket)
+    stream.start()
+    try:
+        enables = [m["params"] for m in socket.sent if m["method"] == "Network.enable"]
+        assert enables == [evidence_module.BUFFERS, {}] and stream.alive()
+    finally:
+        stream.close()
+
+
+def test_a_skipped_locator_says_why_and_the_totals_count_it(monkeypatch, tmp_path):
+    agent = make(monkeypatch, tmp_path)
+    agent.fake.browser.locator.side_effect = TimeoutError("slow")
+    do(agent, "e3", "CLICK")
+    agent.fake.browser.locator.side_effect = None
+    agent.fake.browser.locator.return_value = None  # The node is gone.
+    do(agent, "e3", "CLICK")
+    do(agent)
+    agent.close()
+    events = read(tmp_path / "run" / "trace.jsonl")
+    actions = [e for e in events if e["type"] == "action"]
+    assert [(a["locator"], a["locator_error"]) for a in actions] == [(None, "TimeoutError"), (None, "ElementGone")]
+    assert [h["locator_error"] for h in agent.state["history"]] == ["TimeoutError", "ElementGone"]
+    assert events[-1]["totals"]["locator_missing"] == 2
+    assert "2 executed actions have no locator" in (tmp_path / "run" / "report.html").read_text()
+    assert "no locator: TimeoutError" in (tmp_path / "run" / "report.html").read_text()
+
+
+def test_a_run_with_all_its_locators_counts_none_missing(monkeypatch, tmp_path):
+    agent = make(monkeypatch, tmp_path)
+    do(agent, "e3", "CLICK")
+    do(agent)
+    agent.close()
+    end = read(tmp_path / "run" / "trace.jsonl")[-1]
+    assert end["totals"]["locator_missing"] == 0
+    assert "locator_error" not in agent.state["history"][0]
+
+
+def test_endpoints_must_be_http_or_websocket_urls():
+    assert resolve_endpoint({"BU_CDP_URL": "file:///etc/passwd"})[0] is None
+    assert "http" in resolve_endpoint({"BU_CDP_URL": "ftp://host"})[1]
+    assert resolve_endpoint({"BU_CDP_WS": "http://host"})[0] is None
+    assert resolve_endpoint({"BU_CDP_WS": "wss://host/devtools/browser/1"}) == ("wss://host/devtools/browser/1", None)
+
+
+# --- report: CSP and inert rendering -------------------------------------------------------------------------------
+
+
+def test_the_report_has_a_csp_and_renders_hostile_text_inert(tmp_path):
+    hostile = ['"><img src=x onerror=alert(1)>', "javascript:alert(1)", "</style><script>alert(2)</script>"]
+    events = [
+        {"type": "run_start", "t_ms": 0, "steps": [{"goal": hostile[0], "checks": [hostile[2]]}],
+         "config": {"g": hostile[2]}},
+        {"type": "observe", "t_ms": 1, "url": f"https://example.test/{hostile[1]}", "elements": 1, "screenshot": None},
+        {"type": "action", "t_ms": 2, "index": 1, "label": hostile[0], "kind": "click", "text": hostile[2],
+         "text_source": hostile[1], "locator": {**LOCATOR, "name": hostile[0], "href": hostile[1]}},
+        {"type": "refused", "t_ms": 3, "label": hostile[2], "kind": "click", "reason": hostile[0], "skipped": False},
+    ]
+    console = [{"level": "error", "text": hostile[0], "url": hostile[1]}]
+    network = [record(status=500, url=f"https://example.test/{hostile[2]}")]
+    html_text = render_report(events, console, network, tmp_path, {"console": True, "network": True})
+    assert "Content-Security-Policy" in html_text and "default-src 'none'" in html_text
+    lowered = html_text.lower()
+    assert "<img" not in lowered and "<script" not in lowered and lowered.count("</style>") == 1
+    import re
+
+    assert not re.search(r"<[a-z]+[^>]* on\w+=", lowered)
+    assert "&lt;img src=x onerror=alert(1)&gt;" in html_text
+
+
+# --- HAR shape ---------------------------------------------------------------------------------------------------
+
+
+HAR_ENTRY = {
+    "startedDateTime": str, "time": (int, float),
+    "request": {"method": str, "url": str, "httpVersion": str, "cookies": list, "headers": list, "queryString": [
+        {"name": str, "value": str}], "headersSize": int, "bodySize": int},
+    "response": {"status": int, "statusText": str, "httpVersion": str, "cookies": list, "headers": list,
+                 "content": {"size": int, "mimeType": str}, "redirectURL": str, "headersSize": int, "bodySize": int},
+    "cache": dict, "timings": {"send": (int, float), "wait": (int, float), "receive": (int, float)},
+}
+
+
+def conforms(value, shape, where="entry"):
+    """A minimal structural check of a HAR 1.2 entry: required keys with their types (no external validator)."""
+    if isinstance(shape, dict):
+        assert isinstance(value, dict), where
+        for key, inner in shape.items():
+            assert key in value, f"{where}.{key} is missing"
+            conforms(value[key], inner, f"{where}.{key}")
+    elif isinstance(shape, list):
+        assert isinstance(value, list), where
+        for index, item in enumerate(value):
+            conforms(item, shape[0], f"{where}[{index}]")
+    else:
+        assert isinstance(value, shape) and not isinstance(value, bool), f"{where} is {type(value).__name__}"
+
+
+def test_har_entries_conform_to_the_1_2_field_types_and_carry_the_query_keys():
+    har = build_har(
+        [record(url="https://example.test/a?token=<redacted>&q=<redacted>"), record(status=None, failure="x")], "1"
+    )
+    assert set(har["log"]) == {"version", "creator", "entries"} and set(har["log"]["creator"]) == {"name", "version"}
+    for entry in har["log"]["entries"]:
+        conforms(entry, HAR_ENTRY)
+    first = har["log"]["entries"][0]["request"]["queryString"]
+    assert first == [{"name": "token", "value": "<redacted>"}, {"name": "q", "value": "<redacted>"}]
+    assert har["log"]["entries"][1]["request"]["queryString"] == []

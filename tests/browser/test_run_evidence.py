@@ -73,6 +73,7 @@ def test_a_run_writes_console_network_screenshots_and_a_trace(open_page, fixture
 
     network = lines(run / "network.jsonl")
     by_url = {n["url"].rsplit("/", 1)[-1]: n for n in network}
+    assert by_url["1?token=<redacted>"]["status"] == 200
     assert by_url["0"]["status"] == 200 and by_url["0"]["resource_type"] == "Fetch"
     assert by_url["missing-resource"]["status"] == 404
     assert by_url["unreachable"]["status"] is None and by_url["unreachable"]["failure"]
@@ -93,52 +94,159 @@ def test_a_run_writes_console_network_screenshots_and_a_trace(open_page, fixture
     assert "something broke" in (run / "report.html").read_text()
 
 
+# (label, kind, nth among the shown controls with that label and kind) and the data-m marker of the element it hits.
+LOCATOR_PLAN = [
+    (("Delete", "click", 1), "dialog-delete"),  # The one inside the dialog.
+    (("Open", "click", 1), "beta-open"),  # The link in the Beta row.
+    (("Email address", "fill", 0), "email"),
+    (("Save", "click", 0), "save"),
+    (("Generated", "click", 0), "generated"),
+    (("Delete", "click", 0), "outside-delete"),  # The one outside it.
+    (("Delete", "click", 2), "panel1-delete"),  # Two sections named Panel; a hidden third one comes first.
+    (("Delete", "click", 3), "panel2-delete"),
+    (("Open", "click", 2), "same1-open"),  # Two rows named Same.
+    (("Open", "click", 3), "same2-open"),
+    (("Verify account", "click", 0), "verify"),
+    (("Twin", "click", 1), "twin2"),  # The id is not unique, so it is not an anchor.
+]
+
+
 def test_locators_find_the_same_element_again(open_page, fixture_base_url, monkeypatch, tmp_path):
     open_page("blank.html")
-    plan = [
-        ("Delete", "click", 1),  # The one inside the dialog.
-        ("Open", "click", 1),  # The link in the Beta row.
-        ("Email address", "fill", 0),
-        ("Save", "click", 0),
-        ("Generated", "click", 0),
-        ("Delete", "click", 0),  # The one outside it.
-    ]
-    stub(monkeypatch, plan)
+    stub(monkeypatch, [step for step, _marker in LOCATOR_PLAN])
     run = tmp_path / "run"
     agent = Agent(
-        f"{fixture_base_url}/locators.html", "Exercise it", evidence_dir=run, stuck_after=99, max_steps=10,
+        f"{fixture_base_url}/locators.html", "Exercise it", evidence_dir=run, stuck_after=99, max_steps=30,
         values={"mail": "a@example.test"},
     )
     try:
         for _ in agent.run():
             pass
         history = agent.state["history"]
+        actions = [e for e in trace.load_trace(run / "trace.jsonl") if e["type"] == "action"]
+        assert [a["label"] for a in actions] == [
+            "Delete", "Open", "Email address", "Save", "Generated", "Delete", "Delete", "Delete", "Open", "Open",
+            "Verify account", "Twin",
+        ]
+        locators = [a["locator"] for a in actions]
+        assert [h["locator"] for h in history] == locators and all(not a.get("locator_error") for a in actions)
+
+        # The contract with replay: on a fresh load, each recorded locator resolves to the element it was read from.
+        agent.browser.navigate({"kind": "reload"})
+        found = [agent.browser.resolve(loc) for loc in locators]
+        assert [f and f["marker"] for f in found] == [marker for _step, marker in LOCATOR_PLAN]
+        assert {f["rule"] for f in found} == {"role_name_scope"}
+        # And, when the name no longer matches, through the next rule down.
+        field, save, generated = locators[2], locators[3], locators[4]
+        renamed = {"name": "something else"}
+        assert agent.browser.resolve({**save, **renamed})["rule"] == "test_id"
+        assert agent.browser.resolve({**field, **renamed})["rule"] == "id"
+        assert agent.browser.resolve({**generated, **renamed}) == {
+            "rule": "css_path", "tag": "button", "marker": "generated", "text": "Generated",
+        }
+        assert agent.browser.resolve({"role": "button", "name": "Nope", "ordinal": {"document": 0}}) is None
     finally:
         agent.close()
-    actions = [e for e in trace.load_trace(run / "trace.jsonl") if e["type"] == "action"]
-    assert [a["label"] for a in actions] == ["Delete", "Open", "Email address", "Save", "Generated", "Delete"]
-    assert [h["locator"] for h in history] == [a["locator"] for a in actions]
-    dialog, link, field, save, generated, outside = (a["locator"] for a in actions)
+    dialog, link, field, save, generated, outside, panel1, panel2, same1, same2, verify, twin = locators
 
     assert dialog["role"] == "button" and dialog["name"] == "Delete" and dialog["tag"] == "button"
-    assert dialog["scope"] == {"role": "dialog", "name": "Confirm delete"}
-    assert dialog["ordinal"]["scope"] == 0 and dialog["ordinal"]["document"] == 1
-    assert dialog["ordinal"]["document_count"] == 2
-    assert outside["ordinal"]["document"] == 0 and outside["scope"] == {"role": "main", "name": "Locators"}
-
-    assert link["role"] == "link" and link["href"] == "/items/2?tab=info" and link["scope"]["role"] == "listitem"
-    assert "Beta" in link["scope"]["name"] and link["ordinal"] == {
-        "scope": 0, "scope_count": 1, "document": 1, "document_count": 2,
+    assert {k: dialog["scope"][k] for k in ("role", "name", "ordinal", "count")} == {
+        "role": "dialog", "name": "Confirm delete", "ordinal": 0, "count": 1,
     }
+    assert dialog["scope"]["css_path"].startswith("body > main") and dialog["ordinal"]["scope"] == 0
+    # The hidden Delete buttons are not counted: outside, dialog, two panels.
+    assert dialog["ordinal"]["document"] == 1 and dialog["ordinal"]["document_count"] == 4
+    assert outside["ordinal"]["document"] == 0 and (outside["scope"]["role"], outside["scope"]["name"]) == (
+        "main", "Locators")
+
+    assert link["role"] == "link" and link["scope"]["role"] == "listitem" and "Beta" in link["scope"]["name"]
+    assert link["href"] == "/items/2?tab=<redacted>"
+    assert link["ordinal"] == {"scope": 0, "scope_count": 1, "document": 1, "document_count": 4}
+    assert (same1["scope"]["name"], same1["scope"]["ordinal"], same1["scope"]["count"]) == ("Same", 0, 2)
+    assert (same2["scope"]["name"], same2["scope"]["ordinal"], same2["scope"]["count"]) == ("Same", 1, 2)
+    assert (panel1["scope"]["role"], panel1["scope"]["name"], panel1["scope"]["ordinal"]) == ("region", "Panel", 0)
+    assert (panel2["scope"]["ordinal"], panel2["scope"]["count"]) == (1, 2)
 
     assert field["role"] == "textbox" and field["label_for"] == "Email address" and field["id"] == "email"
-    assert field["placeholder"] == "you@example.test" and field["scope"] == {"role": "form", "name": "Contact"}
+    assert field["placeholder"] == "you@example.test"
+    assert (field["scope"]["role"], field["scope"]["name"]) == ("form", "Contact")
     assert "a@example.test" not in json.dumps(field)
 
     assert save["test_id"] == "save-button" and save["text"] == "Save"
     assert generated["id"] is None and generated["name"] == "Generated"
-    assert all(loc["css_path"].startswith(("body", "main")) or "#" in loc["css_path"] for loc in actions_of(actions))
-    assert all(loc["rect"]["w"] > 0 and loc["rect"]["h"] > 0 for loc in actions_of(actions))
+    assert twin["id"] is None and twin["name"] == "Twin"
+    assert verify["href"] == "/verify?token=<redacted>#<redacted>"
+    assert all(loc["css_path"].startswith(("body", "main")) or "#" in loc["css_path"] for loc in locators)
+    assert all(loc["rect"]["w"] > 0 and loc["rect"]["h"] > 0 for loc in locators)
+    # An undeclared token in a clicked link, a request URL or a console line is in no written file.
+    for path in run.rglob("*"):
+        if path.is_file() and path.suffix != ".jpg":
+            assert "zzz" not in path.read_text(), path.name
+
+
+def test_urls_are_redacted_everywhere_the_run_wrote_them(open_page, fixture_base_url, monkeypatch, tmp_path):
+    open_page("blank.html")
+    stub(monkeypatch, [("Run", "click", 0)])
+    run = tmp_path / "run"
+    agent = Agent(
+        f"{fixture_base_url}/evidence.html?session=zzz", "Press run", evidence_dir=run, stuck_after=99, max_steps=5
+    )
+    try:
+        for _ in agent.run():
+            pass
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not any(
+            "api/1" in n["url"] for n in agent.evidence.stream.snapshot()[1]
+        ):
+            time.sleep(0.05)
+    finally:
+        agent.close()
+    for path in run.rglob("*"):
+        if path.is_file() and path.suffix != ".jpg":
+            assert "zzz" not in path.read_text(), path.name
+    urls = [n["url"] for n in lines(run / "network.jsonl")]
+    page = f"{fixture_base_url}/evidence.html?session=<redacted>"
+    assert page in urls and f"{fixture_base_url}/api/1?token=<redacted>" in urls
+    assert any(c["text"] == f"visiting {page}" for c in lines(run / "console.jsonl"))
+    har = json.loads((run / "network.har").read_text())
+    queries = [q for e in har["log"]["entries"] for q in e["request"]["queryString"]]
+    assert {"name": "token", "value": "<redacted>"} in queries
+
+
+def test_evidence_urls_full_keeps_what_the_page_used(open_page, fixture_base_url, monkeypatch, tmp_path):
+    open_page("blank.html")
+    stub(monkeypatch, [("Verify account", "click", 0)])
+    run = tmp_path / "run"
+    agent = Agent(f"{fixture_base_url}/locators.html", "Open it", evidence_dir=run, evidence_urls="full", max_steps=5)
+    try:
+        for _ in agent.run():
+            pass
+    finally:
+        agent.close()
+    action = next(e for e in trace.load_trace(run / "trace.jsonl") if e["type"] == "action")
+    assert action["locator"]["href"] == "/verify?token=zzz"
+    assert "token=zzz" in (run / "trace.jsonl").read_text()
+
+
+def test_evidence_capture_false_runs_without_the_second_connection(open_page, fixture_base_url, monkeypatch, tmp_path):
+    open_page("blank.html")
+    stub(monkeypatch, [("Run", "click", 0)])
+    run = tmp_path / "run"
+    agent = Agent(
+        f"{fixture_base_url}/evidence.html", "Press run", evidence_dir=run, evidence_capture=False, max_steps=5
+    )
+    try:
+        assert threads() == []
+        for _ in agent.run():
+            pass
+    finally:
+        agent.close()
+    assert not (run / "console.jsonl").exists() and not (run / "network.jsonl").exists()
+    start = trace.load_trace(run / "trace.jsonl")[0]
+    assert start["capture"]["reason"] == "evidence_capture=False"
+    action = next(e for e in trace.load_trace(run / "trace.jsonl") if e["type"] == "action")
+    assert action["locator"]["role"] == "button"
+    assert len(list((run / "screenshots").glob("*.jpg"))) == 3
 
 
 def actions_of(actions):

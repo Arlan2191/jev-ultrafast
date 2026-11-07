@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from .browser import Browser, Refused, StalePage, content_fingerprint, fingerprint
-from .evidence import MODES, Evidence, library_version
+from .evidence import DROPPED_PART, MODES, URL_MODES, Evidence, library_version
 from .keys import validate_keys, validate_urls
 from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS, NONE
@@ -17,6 +17,7 @@ from .trace import SCHEMA
 from .waits import MAX_WAITS, attribute_names, ignore_patterns
 
 TERMINAL = {"done", "blocked", "denied", "budget", "failed"}
+LOCATED = {"click", "fill", "select", "hover"}  # Action kinds that target an element, so get a locator.
 # Dropped from the copy of a page that the model and the state see when a secret value is declared: the marker and the
 # element guards hold raw field values, and only the browser needs them (it keeps the raw page).
 RAW_ONLY = {"marker", "guards"}
@@ -120,7 +121,10 @@ class Agent:
     (also every other observation), "failure" (only the last page, when the run does not end done) or "none";
     without it, True keeps its old meaning (every observation carries a screenshot). locators: add the locator to
     every history entry (on by default with evidence_dir). Console and network need BU_CDP_URL or BU_CDP_WS (they
-    are marked unavailable in run_start otherwise).
+    are marked unavailable in run_start otherwise). evidence_urls: "redacted" (default) writes every URL (network,
+    console, observe, locator href, report) as origin + path with each query value and the fragment replaced by
+    <redacted>; "full" keeps them, for private use only. evidence_capture: False runs without the second websocket
+    (no console or network files; trace, screenshots and locators remain), for CDP endpoints that allow one client.
     new_window: None (default) gives the owned tab a window of its own only in headless Chrome, where a background
     tab is throttled to about one frame per second after its first clicks; True or False force it. Headed Chrome
     has not been tested, and a new window there is a visible one.
@@ -128,7 +132,7 @@ class Agent:
 
     # What an Agent built without __init__ (a test double) means: one unchecked step, no values.
     steps, values, secrets, _raw = (), {}, (), None
-    evidence, locators = None, False
+    evidence, locators, evidence_urls = None, False, "redacted"
     expect_timeout_ms, max_rejections, auto_complete = 5000, 3, True
 
     def __init__(
@@ -140,6 +144,8 @@ class Agent:
         screenshots=None,
         evidence_dir=None,
         locators=None,
+        evidence_urls="redacted",
+        evidence_capture=True,
         max_steps=MAX_STEPS,
         max_model_calls=None,
         settle_ms=50,
@@ -227,7 +233,16 @@ class Agent:
         if locators is not None and type(locators) is not bool:
             raise ValueError("locators must be True, False or None")
         self.locators = bool(evidence_dir) if locators is None else locators
-        self.evidence = Evidence(evidence_dir, mode, clean=self.clean) if evidence_dir else None
+        if evidence_urls not in URL_MODES:
+            raise ValueError(f"evidence_urls must be one of {', '.join(URL_MODES)}")
+        if type(evidence_capture) is not bool:
+            raise ValueError("evidence_capture must be True or False")
+        self.evidence_urls = evidence_urls
+        self.evidence = (
+            Evidence(evidence_dir, mode, clean=self.clean, urls=evidence_urls, capture=evidence_capture)
+            if evidence_dir
+            else None
+        )
         screenshots = screenshots is True
         try:
             self.browser = Browser(
@@ -265,7 +280,8 @@ class Agent:
             body_cap_ms=body_cap_ms, wait_ignore_attributes=list(wait_ignore_attributes),
             wait_interactive_grace_ms=wait_interactive_grace_ms, expect_timeout_ms=expect_timeout_ms,
             max_rejections=max_rejections, auto_complete=auto_complete, require_expectations=require_expectations,
-            before_action=before_action is not None, locators=self.locators,
+            before_action=before_action is not None, locators=self.locators, evidence_urls=evidence_urls,
+            evidence_capture=evidence_capture,
             screenshots=self.evidence.mode if self.evidence else None,
         )
         try:
@@ -405,6 +421,9 @@ class Agent:
                     if isinstance(count, int | float) and not isinstance(count, bool):
                         usage[kind][key] = usage[kind].get(key, 0) + count
         done = sum(r["status"] == "done" for r in state.get("steps", []))
+        missing = sum(
+            1 for h in state["history"] if self.locators and h["kind"] in LOCATED and h.get("locator") is None
+        )
         evidence.event(
             "run_end",
             status=state["status"],
@@ -418,23 +437,28 @@ class Agent:
                 "text_calls": len(state["text_calls"]),
                 "tokens": usage,
                 "wall_ms": state["elapsed_ms"],
+                "locator_missing": missing,
             },
             dropped=evidence.dropped(),
+            dropped_part=DROPPED_PART,
+            capture_lost=evidence.lost(),
             screenshot=evidence.final(self.browser, state["status"]),
         )
         evidence.ended = True
         evidence.write_streams()
 
     def locate(self, action):
-        """The locator of the element an action targets, read in the page just before it runs."""
-        if not self.locators or action["kind"] not in {"click", "fill", "select", "hover"}:
-            return None
+        """(locator, error) for the element an action targets, read in the page just before it runs. The error is
+        None, or why a replayable action has no locator (the trace says so instead of recording a bare null)."""
+        if not self.locators or action["kind"] not in LOCATED:
+            return None, None
         if type(action.get("node")) is not int:
-            return None
+            return None, "NoNode"
         try:
-            return self.clean(self.browser.locator(action["node"]))
-        except Exception:
-            return None
+            found = self.browser.locator(action["node"], full_urls=self.evidence_urls == "full")
+        except Exception as error:
+            return None, type(error).__name__
+        return (self.clean(found), None) if found else (None, "ElementGone")
 
     def raw_page(self):
         raw = self._raw
@@ -754,7 +778,7 @@ class Agent:
                     self.trace("denied", **state["denied"])
                     self.end_step("blocked")
                     return self.stop("denied")
-            locator = self.locate(action)
+            locator, locator_error = self.locate(action)
             # Browser.act checks freshness immediately before input, including after text generation.
             try:
                 outcome = state["browser"].act(action, raw, text=text)
@@ -790,6 +814,7 @@ class Agent:
                     "elapsed_ms": state["elapsed_ms"],
                     **({"waited_ms": waited["waited_ms"], "met": waited["met"]} if waited else {}),
                     **({"locator": locator} if self.locators else {}),
+                    **({"locator_error": locator_error} if locator_error else {}),
                 }
             )
             if self.evidence:
@@ -801,6 +826,7 @@ class Agent:
                     choice=selected,
                     operation=decision["operation"],
                     locator=locator,
+                    locator_error=locator_error,
                     text_source=source,
                     text=recorded,
                     value_name=value_name,

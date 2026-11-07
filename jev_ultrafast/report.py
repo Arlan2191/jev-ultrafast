@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 
 EMBED_LIMIT = 12 * 1024 * 1024
+# The page has no script, link or external asset; a later edit that adds one must also loosen this.
+CSP = "default-src 'none'; img-src data: 'self'; style-src 'unsafe-inline'"
 
 STYLE = """
 :root{--bg:#fff;--fg:#1c1c1e;--muted:#6b6b70;--line:#d8d8de;--card:#f6f6f9;--ok:#1a7f37;--bad:#c62828;--warn:#9a6700}
@@ -43,6 +45,7 @@ def image(path, run_dir, budget):
         source = "data:image/jpeg;base64," + base64.b64encode(data).decode()
     else:
         source = html.escape(path, quote=True)
+        budget["linked"] = True
     return f'<div><img alt="{esc(path)}" src="{source}"></div>'
 
 
@@ -69,6 +72,8 @@ def event_card(event, run_dir, budget):
             lines.append(f"<div>typed <code>{extra}</code> ({esc(event.get('text_source'))})</div>")
         if event.get("locator"):
             lines.append(f'<div class="meta">{esc(locator_text(event["locator"]))}</div>')
+        elif event.get("locator_error"):
+            lines.append(f'<div class="meta warn">no locator: {esc(event["locator_error"])}</div>')
         return '<div class="card">' + "".join(lines) + "</div>"
     if kind == "observe":
         title = f"Observed {esc(event['url'])} ({esc(event['elements'])} elements)"
@@ -95,11 +100,36 @@ def event_card(event, run_dir, budget):
     return ""
 
 
+def capture_notes(start, end, capture):
+    """What the page must not leave unsaid: capture that ended early, records not kept, actions without locators."""
+    notes = []
+    lost = (capture or {}).get("lost") or (end or {}).get("capture_lost")
+    if lost:
+        when = f"{(lost.get('t_ms') or 0) / 1000:.1f} s"
+        notes.append(
+            f"Console and network capture ended at {when}: {lost.get('reason')}. "
+            "Nothing after that is in console.jsonl, network.jsonl or this page."
+        )
+    dropped = (end or {}).get("dropped") or {}
+    if dropped.get("console") or dropped.get("network"):
+        notes.append(
+            f"Not kept (between the first and the last entries of each stream, errors are kept): "
+            f"{dropped.get('console', 0)} console, {dropped.get('network', 0)} network."
+        )
+    if dropped.get("errors"):
+        notes.append(f"{dropped['errors']} capture events could not be read and were skipped.")
+    missing = ((end or {}).get("totals") or {}).get("locator_missing")
+    if missing:
+        notes.append(f"{missing} executed actions have no locator, so this trace cannot be replayed.")
+    return notes
+
+
 def render_report(events, console, network, run_dir, capture=None):
     run_dir, budget = Path(run_dir), {"left": EMBED_LIMIT}
     start = next((e for e in events if e["type"] == "run_start"), {})
     end = next((e for e in reversed(events) if e["type"] == "run_end"), None)
     out = ['<!doctype html><html lang="en"><head><meta charset="utf-8">']
+    out.append(f'<meta http-equiv="Content-Security-Policy" content="{CSP}">')
     out.append('<meta name="viewport" content="width=device-width,initial-scale=1"><title>Run report</title>')
     out.append(f"<style>{STYLE}</style></head><body><h1>Run report</h1>")
     if end:
@@ -113,6 +143,8 @@ def render_report(events, console, network, run_dir, capture=None):
         )
     else:
         out.append('<div class="card warn">The run has no end event (it was interrupted).</div>')
+    for note in capture_notes(start, end, capture):
+        out.append(f'<div class="card warn">{esc(note)}</div>')
     out.append("<h2>Steps</h2><ol>")
     for step in start.get("steps", []):
         checks = "".join(f"<li>{esc(c)}</li>" for c in step.get("checks", []))
@@ -136,5 +168,7 @@ def render_report(events, console, network, run_dir, capture=None):
     out.append("</table>")
     config = esc(json.dumps(start.get("config")))
     out.append(f'<p class="meta">Screenshots are not redacted. Config: <code>{config}</code></p>')
+    if budget.get("linked"):
+        out.append('<p class="meta">Some screenshots are linked from the run directory, not embedded.</p>')
     out.append("</body></html>")
     return "".join(out)

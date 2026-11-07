@@ -3,23 +3,35 @@
 <head><meta charset="utf-8"><title>Locators</title></head>
 <body>
 <main>
+  <!-- Hidden duplicates come first: a locator that counted them would shift every ordinal below. -->
+  <div hidden><button data-m="hidden-delete">Delete</button></div>
+  <section aria-label="Panel" hidden><button data-m="hidden-panel-delete">Delete</button></section>
   <h1>Locators</h1>
-  <button>Delete</button>
+  <button data-m="outside-delete">Delete</button>
   <dialog open aria-label="Confirm delete">
     <p>Remove this item?</p>
-    <button>Delete</button>
+    <button data-m="dialog-delete">Delete</button>
     <button>Cancel</button>
   </dialog>
   <ul>
     <li><span>Alpha</span> <a href="/items/1?tab=info" onclick="return false">Open</a></li>
-    <li><span>Beta</span> <a href="/items/2?tab=info" onclick="return false">Open</a></li>
+    <li><span>Beta</span> <a href="/items/2?tab=info" data-m="beta-open" onclick="return false">Open</a></li>
   </ul>
   <form aria-label="Contact">
     <label for="email">Email address</label>
-    <input id="email" type="text" placeholder="you@example.test">
+    <input id="email" data-m="email" type="text" placeholder="you@example.test">
   </form>
-  <button data-testid="save-button">Save</button>
-  <button id=":r1:">Generated</button>
+  <button data-testid="save-button" data-m="save">Save</button>
+  <button id=":r1:" data-m="generated">Generated</button>
+  <section aria-label="Panel"><button data-m="panel1-delete">Delete</button></section>
+  <section aria-label="Panel"><button data-m="panel2-delete">Delete</button></section>
+  <ul>
+    <li><span>Same</span> <a href="/same/1" data-m="same1-open" onclick="return false">Open</a></li>
+    <li><span>Same</span> <a href="/same/2" data-m="same2-open" onclick="return false">Open</a></li>
+  </ul>
+  <a href="/verify?token=zzz#frag-zzz" data-m="verify" onclick="return false">Verify account</a>
+  <button id="twin" data-m="twin1">Twin</button>
+  <button id="twin" data-m="twin2">Twin</button>
   <p id="status">idle</p>
 </main>
 <script>

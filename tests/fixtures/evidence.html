@@ -7,9 +7,11 @@
 <p id="status">idle</p>
 <script>
   console.log('page loaded', 42);
+  console.log('visiting', location.href);
   // Chrome reports a response as finished only once its body is read.
   const read = response => response.text();
   fetch('/api/0').then(read).catch(() => {});
+  fetch('/api/1?token=zzz').then(read).catch(() => {});
   document.getElementById('run').addEventListener('click', () => {
     console.log('hello', {a: 1});
     console.warn('careful now');
