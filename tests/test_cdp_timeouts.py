@@ -9,7 +9,7 @@ from browser_harness.helpers import _IPCResponseTimeout
 from jev_ultrafast import agent as loop
 from jev_ultrafast import browser as browser_module
 from jev_ultrafast.agent import Agent
-from jev_ultrafast.browser import Browser, MutationTimeout, ReadTimeout, StalePage, browser_operation
+from jev_ultrafast.browser import Browser, StalePage, browser_operation
 
 
 def fake_cdp(calls, slow=()):
@@ -77,13 +77,13 @@ def test_the_operation_script_uses_the_browsers_timeout(monkeypatch):
 
 
 def test_a_timed_out_read_is_a_stale_page_and_a_timeout():
-    assert issubclass(ReadTimeout, StalePage) and issubclass(ReadTimeout, TimeoutError)
+    assert issubclass(browser_module.ReadTimeout, StalePage) and issubclass(browser_module.ReadTimeout, TimeoutError)
 
 
 def test_a_read_that_times_out_raises_read_timeout_naming_the_call(monkeypatch):
     calls = []
     monkeypatch.setattr(browser_module, "cdp", fake_cdp(calls, slow={"Runtime.evaluate"}))
-    with pytest.raises(ReadTimeout, match="Runtime.evaluate timed out after 15s"):
+    with pytest.raises(browser_module.ReadTimeout, match="Runtime.evaluate timed out after 15s"):
         browser_module.send("Runtime.evaluate", "s", 15, expression="1")
 
 
@@ -93,7 +93,7 @@ def test_a_read_that_times_out_raises_read_timeout_naming_the_call(monkeypatch):
 def test_a_mutation_that_times_out_raises_mutation_timeout_naming_the_call(method, monkeypatch):
     calls = []
     monkeypatch.setattr(browser_module, "cdp", fake_cdp(calls, slow={method}))
-    with pytest.raises(MutationTimeout, match=f"{method} timed out after 4s") as raised:
+    with pytest.raises(browser_module.MutationTimeout, match=f"{method} timed out after 4s") as raised:
         browser_module.send(method, "s", 4)
     assert not isinstance(raised.value, StalePage | TimeoutError) and "not retried" in str(raised.value)
     assert len(calls) == 1
@@ -102,7 +102,8 @@ def test_a_mutation_that_times_out_raises_mutation_timeout_naming_the_call(metho
 def test_observe_looks_again_after_a_read_timeout(monkeypatch):
     browser = Browser.__new__(Browser)
     browser.session = "s"
-    answers = [ReadTimeout("Runtime.evaluate timed out"), ReadTimeout("Page.captureScreenshot timed out"), {"ok": 1}]
+    slow = browser_module.ReadTimeout
+    answers = [slow("Runtime.evaluate timed out"), slow("Page.captureScreenshot timed out"), {"ok": 1}]
 
     def operation(_request):
         answer = answers.pop(0)
@@ -117,9 +118,9 @@ def test_observe_looks_again_after_a_read_timeout(monkeypatch):
 def test_observe_is_bounded_when_every_read_times_out(monkeypatch):
     browser = Browser.__new__(Browser)
     browser.session = "s"
-    operation = Mock(side_effect=ReadTimeout("Runtime.evaluate timed out"))
+    operation = Mock(side_effect=browser_module.ReadTimeout("Runtime.evaluate timed out"))
     monkeypatch.setattr(browser_module, "browser_operation", operation)
-    with pytest.raises(ReadTimeout):
+    with pytest.raises(browser_module.ReadTimeout):
         browser.observe()
     assert operation.call_count == 10
 
@@ -131,7 +132,7 @@ def test_a_read_timeout_in_the_freshness_check_makes_the_agent_observe_again():
     agent = loop.Agent.__new__(loop.Agent)
     agent.screenshots, agent.pending_text, agent.replay = False, None, None
     agent.max_steps, agent.max_model_calls, agent.stuck_after, agent.before_action = 60, 120, 3, None
-    fresh = Mock(side_effect=ReadTimeout("Runtime.evaluate timed out"))
+    fresh = Mock(side_effect=browser_module.ReadTimeout("Runtime.evaluate timed out"))
     browser = Mock(fresh=fresh, observe=Mock(return_value=fresh_page))
     agent.browser = browser
     agent.state = {
@@ -163,7 +164,7 @@ def input_calls(monkeypatch, slow):
 def test_a_click_whose_press_times_out_is_never_retried(monkeypatch):
     calls = input_calls(monkeypatch, "Input.dispatchMouseEvent")
     request = {"operation": "act", "session": "s", "action": {"kind": "click", "id": "e1", "node": 1}}
-    with pytest.raises(MutationTimeout, match="Input.dispatchMouseEvent timed out"):
+    with pytest.raises(browser_module.MutationTimeout, match="Input.dispatchMouseEvent timed out"):
         browser_operation(request)
     assert calls.count("Input.dispatchMouseEvent") == 1  # The move; nothing after it was sent.
 
@@ -174,7 +175,7 @@ def test_a_key_that_times_out_is_not_retried_and_the_browser_does_not_observe(mo
     browser.session, browser.cdp_timeout_ms, browser.navigation_timeout_ms = "s", 15000, 15000
     browser.keys, browser.urls = (), {}
     action = {"kind": "key", "key": "Enter", "id": "key:Enter"}
-    with pytest.raises(MutationTimeout, match="Input.dispatchKeyEvent timed out"):
+    with pytest.raises(browser_module.MutationTimeout, match="Input.dispatchKeyEvent timed out"):
         browser.send(action, {}, None)
     assert calls.count("Input.dispatchKeyEvent") == 1
     assert getattr(browser, "after_input", None) is None
@@ -185,7 +186,7 @@ def test_a_navigation_that_times_out_is_a_mutation_error(monkeypatch):
     browser = Browser.__new__(Browser)
     browser.session, browser.cdp_timeout_ms, browser.navigation_timeout_ms = "s", 15000, 15000
     monkeypatch.setattr(Browser, "evaluate", lambda self, expression: [0, "u"])
-    with pytest.raises(MutationTimeout, match="Page.navigate timed out"):
+    with pytest.raises(browser_module.MutationTimeout, match="Page.navigate timed out"):
         browser.navigate({"kind": "goto", "url": "https://example.test/"})
     assert calls.count("Page.navigate") == 1
 
@@ -196,7 +197,7 @@ def test_a_select_whose_script_times_out_is_a_mutation(monkeypatch):
         "operation": "act", "session": "s",
         "action": {"kind": "select", "id": "e1", "node": 1, "value": "a"},
     }
-    with pytest.raises(MutationTimeout, match="Runtime.evaluate timed out"):
+    with pytest.raises(browser_module.MutationTimeout, match="Runtime.evaluate timed out"):
         browser_operation(request)
     assert calls == ["Runtime.evaluate"]
 
@@ -204,6 +205,6 @@ def test_a_select_whose_script_times_out_is_a_mutation(monkeypatch):
 def test_a_click_locate_that_times_out_is_a_stale_read_and_nothing_was_pressed(monkeypatch):
     calls = input_calls(monkeypatch, "Runtime.evaluate")
     request = {"operation": "act", "session": "s", "action": {"kind": "click", "id": "e1", "node": 1}}
-    with pytest.raises(ReadTimeout):
+    with pytest.raises(browser_module.ReadTimeout):
         browser_operation(request)
     assert "Input.dispatchMouseEvent" not in calls
