@@ -1,5 +1,7 @@
 """Viewport option: validation and what reaches the browser (offline)."""
 
+import subprocess
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -88,3 +90,21 @@ def test_the_agent_validates_before_opening_anything(monkeypatch):
     with pytest.raises(ValueError, match="viewport"):
         Agent("https://example.test/", "Find a book", viewport=(0, 600))
     opened.assert_not_called()
+
+
+def scroll_step(height):
+    """Evaluate the scroll step line of snapshot.js with a given innerHeight."""
+    source = (Path(__file__).resolve().parent.parent / "jev_ultrafast" / "snapshot.js").read_text()
+    line = next(row.strip() for row in source.splitlines() if row.strip().startswith("const step="))
+    out = subprocess.run(
+        ["node", "-e", f"const innerHeight={height}; {line} console.log(step)"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(out.stdout)
+
+
+@pytest.mark.parametrize("height, step", [(780, 560), (400, 287), (1, 1), (0, 1)])
+def test_the_scroll_step_follows_the_viewport_height(height, step):
+    assert scroll_step(height) == step

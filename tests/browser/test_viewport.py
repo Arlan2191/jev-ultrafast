@@ -1,4 +1,8 @@
-"""The viewport option against a real tab: responsive layout and the wheel at a small size."""
+"""The viewport option against a real tab: responsive layout and scrolling at a small size.
+
+The wheel scroll test is a smoke test: Chrome still scrolls the page for a wheel event outside the viewport, so it does
+not pin the wheel point. The offline tests in tests/test_viewport_option.py are the guard for the wheel point and step.
+"""
 
 import time
 
@@ -30,3 +34,22 @@ def test_the_wheel_scrolls_at_a_small_viewport(open_page):
     while browser.evaluate("scrollY") == 0 and time.monotonic() < deadline:
         time.sleep(0.05)
     assert browser.evaluate("scrollY") > 0
+
+
+def scroll_down_and_wait(browser, page):
+    before = page["scroll"]["y"]
+    browser.act(next(a for a in page["actions"] if a["id"] == "scroll_down"), page)
+    deadline = time.monotonic() + 5
+    while browser.evaluate("scrollY") == before and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return browser.observe(screenshot=False)
+
+
+def test_two_scroll_downs_leave_no_unseen_band_at_a_short_viewport(open_page):
+    browser = open_page("tall_list.html", viewport=(800, 400))
+    page = browser.observe(screenshot=False)
+    seen = {line for line in page["text"].splitlines()}
+    for _ in range(2):
+        page = scroll_down_and_wait(browser, page)
+        seen |= set(page["text"].splitlines())
+    assert {f"Row {i:02d}" for i in range(1, 25)} <= seen
