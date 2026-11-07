@@ -91,6 +91,10 @@ def fixture_server():
             if api:
                 time.sleep(int(api[1]) / 1000)
                 return self.stream(["ok"], 0)
+            # /items/<id>/<file> answers /<file>: a page whose URL path carries a resource id.
+            item = re.match(r"/items/[^/?]+(/[^/?]+)(\?.*)?$", self.path)
+            if item:
+                self.path = item[1] + (item[2] or "")
             # /delay/<ms>/<path> answers <path> after <ms>: a form or link whose server is slow.
             match = re.match(r"/delay/(\d+)(/.*)", self.path)
             if match:

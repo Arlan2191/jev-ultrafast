@@ -1125,3 +1125,94 @@ def test_replay_uses_the_callers_viewport_not_the_recorded_one(journey):
     start = load_trace(journey.tmp_path / "replayed" / "trace.jsonl")[0]
     assert recorded == {"width": 1120, "height": 780}
     assert start["viewport"] == {"width": 1470, "height": 920}
+
+
+# --- id-tolerant routes -------------------------------------------------------------------------------------------
+
+UUID_A, UUID_B = "3f2b8c1e-5d4a-4e7b-9c6d-1a2b3c4d5e6f", "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+
+
+@pytest.mark.parametrize(
+    "a,b,same",
+    [
+        (f"/chat/{UUID_A}", f"/chat/{UUID_B}", True),
+        (f"/chat/{UUID_A.upper()}", f"/chat/{UUID_B}", True),
+        ("/chat/new", f"/chat/{UUID_A}", False),
+        ("/a/123", "/a/124", True),
+        ("/a/123", "/a/settings", False),
+        ("/a/settings", "/a/admin", False),
+        ("/o/deadbeef01", "/o/0badcafe99", True),  # Hex run of 8+ with a digit.
+        ("/o/deadbeef", "/o/facecafe", False),  # No digit: a word, not an id.
+        ("/o/abc123", "/o/def456", False),  # Hex but shorter than 8.
+        ("/s/Zm9vYmFyMTIzNDU2Nzg5", "/s/QmF6cXV4OTg3NjU0MzIx", True),  # base64url-ish, letters and digits.
+        ("/s/averyverylongsegmentname", "/s/anotherverylongsegmentx", False),  # 16+ but no digit.
+        (f"/chat/{UUID_A}/messages", f"/chat/{UUID_B}/messages", True),
+        (f"/chat/{UUID_A}/messages", f"/chat/{UUID_B}/files", False),
+        (f"/chat/{UUID_A}", f"/room/{UUID_B}", False),
+    ],
+)
+def test_id_like_path_segments_are_compared_by_shape(a, b, same):
+    from jev_ultrafast import replay
+
+    host = "https://example.test"
+    assert (replay.route(host + a) == replay.route(host + b)) is same
+    planned = replay.Planned("click", "x", page_url=host + a)
+    assert (replay.page_cause(planned, host + b) is None) is same
+    wait = replay.Planned("wait", "wait", page_url=host + a + "?q=<redacted>")
+    assert (replay.page_cause(wait, host + b + "?q=1") is None) is same
+
+
+def test_a_page_bound_kind_still_needs_the_same_query_keys_and_host():
+    from jev_ultrafast import replay
+
+    wait = replay.Planned("reload", "reload", page_url=f"https://example.test/chat/{UUID_A}?tab=<redacted>")
+    assert replay.page_cause(wait, f"https://example.test/chat/{UUID_B}?tab=2") is None
+    assert replay.page_cause(wait, f"https://example.test/chat/{UUID_B}?other=2") == "page_changed"
+    assert replay.page_cause(wait, f"https://other.test/chat/{UUID_B}?tab=2") == "page_changed"
+
+
+def test_a_goto_url_check_stays_exact():
+    from jev_ultrafast import replay
+
+    goto = replay.Planned("goto", "goto:chat", url=f"https://example.test/chat/{UUID_A}")
+    declared = {"id": "goto:chat", "kind": "goto", "url": f"https://example.test/chat/{UUID_B}"}
+    assert replay.control_action(goto, [declared]) == (None, "goto_url_changed")
+
+
+def test_a_declared_route_pattern_is_compared_by_pattern():
+    from jev_ultrafast import replay
+
+    routes = replay.route_patterns([r"^/orders/[^/]+$"])
+    host = "https://example.test"
+    assert replay.route(host + "/orders/pending", routes) == replay.route(host + "/orders/archived", routes)
+    assert replay.route(host + "/orders/pending") != replay.route(host + "/orders/archived")
+    assert replay.route(host + "/orders/pending", routes) != replay.route(host + "/invoices/pending", routes)
+    assert replay.route(host + "/orders/a/b", routes) != replay.route(host + "/orders/a/c", routes)
+    planned = replay.Planned("fill", "x", page_url=host + "/orders/pending")
+    assert replay.page_cause(planned, host + "/orders/archived") == "page_changed"
+    assert replay.page_cause(planned, host + "/orders/archived", routes) is None
+
+
+@pytest.mark.parametrize("bad", ["^/a$", (1,), [1], ["("], [b"x"], {"a": 1}])
+def test_replay_routes_must_be_a_list_of_regular_expressions(bad):
+    from jev_ultrafast import replay
+
+    with pytest.raises(ValueError, match="replay_routes"):
+        replay.route_patterns(bad)
+
+
+def test_replay_routes_accepts_compiled_patterns_and_none():
+    import re
+
+    from jev_ultrafast import replay
+
+    assert replay.route_patterns(None) == ()
+    assert replay.route_patterns([re.compile("^/x$")])[0].pattern == "^/x$"
+
+
+def test_an_agent_with_a_bad_replay_route_opens_no_browser(monkeypatch):
+    opened = Mock()
+    monkeypatch.setattr(loop, "Browser", opened)
+    with pytest.raises(ValueError, match="replay_routes"):
+        Agent("https://example.test/", "goal", replay_routes=["("])
+    opened.assert_not_called()
