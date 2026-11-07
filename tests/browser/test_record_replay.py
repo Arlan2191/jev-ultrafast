@@ -65,14 +65,17 @@ def lab(open_page, fixture_base_url, monkeypatch, tmp_path):
     agents, counter = [], iter(range(1000))
 
     class Lab:
-        def run(self, model_mode="record", allowed=(), url=PAGE, **kwargs):
+        def run(self, model_mode="record", allowed=(), url=PAGE, goals=None, chooser=None, **kwargs):
             model = Model(monkeypatch, model_mode, allowed)
+            if chooser:
+                model.calls = chooser.calls = []
+                monkeypatch.setattr(loop, "choose", chooser)
             kwargs.setdefault("values", {"query": "dune"})
             kwargs.setdefault("evidence_dir", tmp_path / f"run{next(counter)}")
             kwargs.setdefault("evidence_capture", False)
             kwargs.setdefault("screenshots", "none")
             started = time.perf_counter()
-            agent = Agent(f"{fixture_base_url}/{url}", steps(), **kwargs)
+            agent = Agent(f"{fixture_base_url}/{url}", goals or steps(), **kwargs)
             agents.append(agent)
             model.agent = agent
             for _ in agent.run():
@@ -210,3 +213,79 @@ def test_a_secret_stays_out_of_the_trace_and_is_typed_again_from_the_caller(lab)
     assert again.browser.evaluate("document.getElementById('q').value") == SECRET
     again.close()
     assert SECRET not in lab.trace(again).read_text()
+
+
+def test_a_reordered_list_heals_and_never_opens_the_row_now_in_the_recorded_position(lab):
+    agent, _state, _model, _wall = lab.run()
+    agent.close()
+    # Rows a and b swap: the count, the names and the scopes are as recorded, and position 2 holds another row.
+    again, healed, model, _wall = lab.run("heal", [SECOND], url=PAGE + "?variant=swapped", replay=lab.trace(agent))
+    assert healed["status"] == "done" and healed["verified"] is True, healed["stop_reason"]
+    assert model.calls == [SECOND]
+    assert lab.clicked(again) == ["b"]  # Not "a", which sits where "b" was.
+    again.close()
+    heal = next(e for e in load_trace(lab.trace(again)) if e["type"] == "heal")
+    assert heal["cause"] == "ambiguous" and heal["step"] == 1
+
+
+def test_a_key_is_not_pressed_on_another_element_than_the_recorded_one(lab):
+    goals = [Step("Submit the query", expect=expect.text("Submitted"))]
+
+    def chooser(page, goal, history, **extra):
+        chooser.calls.append(goal)
+        if chooser.forbid:
+            raise AssertionError("the model was asked during a replay")
+        choice = next(a["id"] for a in page["actions"] if a["id"] == "key:Enter")
+        return {
+            "choice": choice, "operation": "PRESS_KEY", "target": "1", "confidence": 1.0,
+            "probabilities": {choice: 1.0}, "latency_ms": 1, "usage": {},
+        }
+
+    chooser.forbid = False
+    agent, state, _model, _wall = lab.run(url="replay_focus.html", goals=goals, chooser=chooser)
+    assert state["status"] == "done" and agent.browser.evaluate("window.__deleted") == 0
+    agent.close()
+    key = next(e for e in load_trace(lab.trace(agent)) if e["type"] == "action")
+    assert key["kind"] == "key" and key["focus"]["label"] == "Query"
+
+    chooser.forbid = True
+    same, replayed, _model, _wall = lab.run(
+        url="replay_focus.html", goals=goals, chooser=chooser, replay=lab.trace(agent)
+    )
+    assert replayed["status"] == "done" and sources(replayed) == ["replay"]
+    same.close()
+
+    # Focus is on Delete now: Enter would delete. The replay stops before pressing it.
+    moved, stopped, _model, _wall = lab.run(
+        url="replay_focus.html?variant=moved", goals=goals, chooser=chooser, replay=lab.trace(agent), heal=False
+    )
+    assert stopped["status"] == "diverged" and stopped["stop_reason"] == "focus_changed at step 1"
+    assert moved.browser.evaluate("window.__deleted") == 0 and stopped["history"] == []
+
+
+def test_a_press_that_an_optimistic_page_takes_back_is_not_done_under_replay(lab):
+    goals = [Step("Upvote it", expect=expect.element(role="button", name="Upvote", state={"pressed": True}))]
+
+    def chooser(page, goal, history, **extra):
+        chooser.calls.append(goal)
+        if chooser.forbid:
+            raise AssertionError("the model was asked during a replay")
+        choice = next(a["id"] for a in page["actions"] if a["kind"] == "click" and a["label"] == "Upvote")
+        return {
+            "choice": choice, "operation": "CLICK", "target": "1", "confidence": 1.0,
+            "probabilities": {choice: 1.0}, "latency_ms": 1, "usage": {},
+        }
+
+    chooser.forbid = False
+    agent, state, _model, _wall = lab.run(url="steps_toggle.html", goals=goals, chooser=chooser)
+    assert state["status"] == "done" and state["verified"]
+    agent.close()
+
+    chooser.forbid = True
+    again, stopped, _model, _wall = lab.run(
+        url="steps_flaky.html?revert=300", goals=goals, chooser=chooser, replay=lab.trace(agent), heal=False,
+        action_settle_timeout_ms=0, expect_timeout_ms=400,
+    )
+    assert stopped["status"] == "diverged" and stopped["verified"] is False
+    assert stopped["stop_reason"] in {"checks_unstable at step 1", "checks_unmet at step 1"}
+    assert again.browser.evaluate("document.querySelector('button').getAttribute('aria-pressed')") == "false"

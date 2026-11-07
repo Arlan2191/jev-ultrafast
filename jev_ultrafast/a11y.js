@@ -87,6 +87,20 @@
       (rname!==null || (c.tagName.toLowerCase()===tag && (c.type ?? null)===type)));
   const textOf = e => e.isContentEditable || e.tagName==='SELECT' || e.tagName==='TEXTAREA' ? '' :
     clip(e.innerText || e.textContent);
+  // A short digest of the text a container shows: whitespace-normalised, no field values (an input has no text node;
+  // a textarea, a select and an editable region are skipped), nothing hidden. Tells apart look-alike rows by what
+  // they say, so a re-sorted list is not mistaken for the recorded one. 32-bit FNV-1a, hex.
+  const textDigest = root => {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), parts = [];
+    for (let n=walker.nextNode(); n; n=walker.nextNode()) {
+      const p=n.parentElement;
+      if (p && !p.closest('script,style,template,textarea,select,[contenteditable="true"]') && shown(p)) parts.push(n.textContent);
+    }
+    const text=parts.join(' ').replace(/\s+/g,' ').trim().slice(0,4000);
+    let h=0x811c9dc5;
+    for (let i=0; i<text.length; i++) { h^=text.charCodeAt(i); h=Math.imul(h,0x01000193)>>>0; }
+    return h.toString(16).padStart(8,'0');
+  };
   const TEST_ATTRS = ['data-testid','data-test','data-qa','data-cy'];
   const withTestId = v => [...document.querySelectorAll(TEST_ATTRS.map(a => '['+a+']').join(','))]
     .filter(c => TEST_ATTRS.some(a => c.getAttribute(a)===v));
@@ -143,6 +157,9 @@
       id: anchorId(e.id) ? e.id : null, id_unique: anchorId(e.id) ? withId(e.id)===1 : null, scope,
       ordinal: {scope: inScope.indexOf(e), scope_count: inScope.length,
         document: inDocument.indexOf(e), document_count: inDocument.length},
+      // Of the scope, or of the page when there is none and look-alikes exist: what `resolve` needs when position
+      // alone would decide (see there).
+      digest: container ? textDigest(container) : (inDocument.length>1 ? textDigest(document.body) : null),
       text: textOf(e), css_path: cssPath(e),
       rect: {x:Math.round(r.x), y:Math.round(r.y), w:Math.round(r.width), h:Math.round(r.height)},
     };
@@ -155,7 +172,8 @@
   // The element a recorded locator points at on the page as it is now, or null; never another element.
   // {element, rule, unique, count_match, verified}. The primary rule (role_name_scope) takes the role + name matches
   // inside the scope (itself found by role + name + ordinal) and accepts one only when the recorded in-scope count
-  // (and, with a scope, the recorded scope count) equals the current one; otherwise it refuses with rule "ambiguous".
+  // (and, with a scope, the recorded scope count) equals the current one and, when position alone decides, the digest of
+  // the scope's text (the page's, without a scope) equals the recorded one; otherwise it refuses with rule "ambiguous".
   // Then test_id and a unique stable id, each accepted only if `verifies`, unique then and now, and not under a
   // scope that had siblings of its kind (its count was 1 or there was no scope). css_path is never a resolution: it comes
   // back as {element:null, rule:'hint', hint:{tag,text}} for the caller to show or ignore.
@@ -176,6 +194,11 @@
         const unique = found.length===1, count_match = sameScopeCount && found.length===recorded;
         const element = found[ordinal];
         if (!Number.isInteger(ordinal) || !element || !count_match) return none('ambiguous');
+        // Position alone decides among look-alikes (several matches in the scope, or sibling scopes of the same
+        // name): then what the scope says must be what it said. A locator without a digest (schema 1) cannot tell.
+        if ((!unique || (loc.scope && loc.scope.count>1)) &&
+            (typeof loc.digest!=='string' || textDigest(loc.scope ? root : document.body)!==loc.digest))
+          return none('ambiguous');
         if (verifies(element, loc)) return {element, rule:'role_name_scope', unique, count_match, verified:true};
       }
     }

@@ -15,7 +15,7 @@ from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS, NONE
 from .steps import parse_goals, redaction, secret_forms, validate_values
 from .trace import SCHEMA
-from .waits import MAX_WAITS, attribute_names, ignore_patterns
+from .waits import MAX_WAITS, attribute_names, ignore_patterns, needs_settle
 
 TERMINAL = {"done", "blocked", "denied", "budget", "failed", "diverged"}
 LOCATED = {"click", "fill", "select", "hover"}  # Action kinds that target an element, so get a locator.
@@ -107,10 +107,11 @@ class Agent:
     no model: for each step it re-resolves every recorded element by its locator, runs the matching action through
     the usual path (freshness, before_action, settle, history, evidence; source "replay") and moves on when the step's
     checks hold. When a step diverges (the locator no longer resolves to one element, the control is no longer
-    offered, a press is refused or stale twice in a row, or the recorded actions are spent while the checks do not
-    hold) heal=True (default) hands the rest of that step to the normal model loop and resumes replay at the next
-    step; heal=False ends the run as "diverged" with stop_reason "<cause> at step N". A before_action veto still ends
-    the run as "denied". state["replay"] counts steps_replayed, steps_healed, actions_replayed and model_calls.
+    offered, a press is refused or stale twice in a row, the recorded actions are spent while the checks do not
+    hold or do not stay held, a goto URL, scroll distance or key focus differs from the recorded one) heal=True
+    (default) hands the rest of that step to the normal model loop and resumes replay at the next step; heal=False
+    ends the run as "diverged" with stop_reason "<cause> at step N". A before_action veto still ends the run as
+    "denied". state["replay"] counts steps_replayed, steps_healed, actions_replayed and model_calls.
     goals: a string, or a list of strings and Step(goal, expect=(), values=None). Each item is one step; the model
     sees only the current step's goal, the goals already completed and the current step's check descriptions.
     Checks (jev_ultrafast.expect) are evaluated in code. A DONE choice on a step with checks is accepted only when
@@ -587,8 +588,26 @@ class Agent:
         """The checks held once. A page that applies a press optimistically and takes it back (a server that refused)
         holds them for an instant, so wait for the page to settle and read every check again."""
         if self.expect_timeout_ms:
-            self.state["browser"].settled(timeout_ms=self.expect_timeout_ms)
+            browser = self.state["browser"]
+            quiet = {"quiet_ms": browser.action_settle_quiet_ms} if self.quiet_replay() else {}
+            browser.settled(timeout_ms=self.expect_timeout_ms, **quiet)
         return self.run_checks(True, everything=True, again=True)
+
+    def quiet_replay(self):
+        """Replay only: the fixed quiet window of stable() exists to catch an optimistic UI that a server takes back,
+        which needs a counted request or a short timer. With the post-action settle on (it waited for any that the
+        action started), none pending or started since, and no check that could change the page by being read, the
+        shorter post-action window is enough. The double read stays."""
+        step, _record = self.current_step()
+        browser = self.state["browser"]
+        if not self.replaying() or not step or not all(e.cheap for e in step.expect):
+            return False
+        if not browser.action_settle_timeout_ms:
+            return False  # The caller turned the post-action wait off: this window is the only guard left.
+        try:
+            return not needs_settle(browser.activity())
+        except Exception:
+            return False
 
     def reject(self, unmet):
         """Record a DONE that did not hold (also a step that completed by itself but did not stay complete). Returns
@@ -662,7 +681,14 @@ class Agent:
         state = self.state
         if name == "tick":
             if self.replaying():
-                return self.replay_tick()
+                try:
+                    return self.replay_tick()
+                except StalePage:
+                    # The observation itself went stale (a navigation that is slow to settle): look again.
+                    state["decision"], state["status"] = None, "ready"
+                    state["page"] = self.observe()
+                    state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
+                    return self.snapshot()
             try:
                 self.command("predict", {})
                 if state["status"] in TERMINAL:
@@ -872,6 +898,7 @@ class Agent:
                     text=recorded,
                     value_name=value_name,
                     key=shown.get("key"),
+                    focus=shown.get("focused") if shown["kind"] == "key" else None,
                     url=shown.get("url"),
                     result=outcome if isinstance(outcome, dict) else None,
                 )
@@ -889,9 +916,12 @@ class Agent:
                     base64.b64decode(state["page"]["screenshot"])
                 )
             repeated = state["history"][-self.stuck_after :]
+            # A replayed action is not a loop risk: the recorded run passed this rule, the plan is finite, and a page
+            # that stopped reacting is a divergence for replay_tick to heal, not a reason to stop.
             state["status"] = (
                 "blocked"
-                if len(repeated) == self.stuck_after
+                if decision.get("source") != "replay"
+                and len(repeated) == self.stuck_after
                 and all(
                     h["content_changed"] is False and (h["kind"] != "wait" or h.get("met") is False)
                     for h in repeated
@@ -911,6 +941,9 @@ class Agent:
                 unmet = self.stable()
                 if not unmet:
                     self.complete_step()
+                elif decision.get("source") == "replay":
+                    # Held once and not twice (an optimistic rollback): for the model loop to look at, not a reject.
+                    self.diverge(state["plan_index"], "checks_unstable")
                 elif not self.reject(unmet) and state["status"] == "blocked":
                     self.end_step("blocked")
             elif state["status"] == "blocked":
@@ -939,7 +972,7 @@ class Agent:
             cause = recorded.unresolved(found)
             action, cause = (None, cause) if cause else recorded.element_action(planned, actions, found["node"])
         else:
-            action, cause = recorded.control_action(planned, actions)
+            action, cause = recorded.control_action(planned, actions, self.state["page"].get("focus"))
         if cause:
             return None, cause
         decision = {
@@ -981,11 +1014,18 @@ class Agent:
         if cause:
             return self.diverge(index, cause)
         state["decision"], state["status"] = decision, "predicted"
+        executed = len(state["history"])
         try:
             self.command("act", {"fingerprint": state["page"]["fingerprint"]})
         except StalePage as error:
-            # Nothing was executed (a refusal or a stale page is raised before input): look again, once.
             state["decision"], state["status"] = None, "ready"
+            if len(state["history"]) > executed:
+                # It ran, and only the observation after it went stale. Decide by what happened, never by the
+                # exception: the action is done, the cursor moves on and the next tick looks at the page again.
+                run.failures = 0
+                run.cursor[1] += 1
+                return self.snapshot()
+            # Nothing was executed (a refusal or a stale page is raised before input): look again, once.
             run.failures += 1
             if run.failures >= 2:
                 return self.diverge(index, ("refused" if isinstance(error, Refused) else "stale") + "_twice")

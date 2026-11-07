@@ -16,7 +16,10 @@ NODES = {"Search": 10, "Go": 20, "Row B": 40, "Pin": 50}
 SECRET = "hunter2-correct-horse"
 
 
-def page():
+FOCUS = {"role": "textbox", "label": "Search", "href": None, "tag": "input", "type": "text"}
+
+
+def page(focus=None, goto_url="https://example.test/", delta=560):
     def click(node, label):
         return {"id": f"c{node}", "kind": "click", "label": label, "role": "button", "value": "", "node": node}
 
@@ -31,10 +34,11 @@ def page():
             click(40, "Row B"),
             click(50, "Pin"),
             {"id": "wait", "kind": "wait", "label": "Wait"},
-            {"id": "scroll_down", "kind": "scroll", "label": "Scroll down", "delta": 560},
+            {"id": "scroll_down", "kind": "scroll", "label": "Scroll down", "delta": delta},
             {"id": "key:Enter", "kind": "key", "key": "Enter", "name": "Enter", "label": "Press Enter"},
-            {"id": "goto:home", "kind": "goto", "name": "home", "url": "https://example.test/", "label": "Open home"},
+            {"id": "goto:home", "kind": "goto", "name": "home", "url": goto_url, "label": "Open home"},
         ],
+        "focus": focus,
         "marker": ["m"],
         "page_key": ["k"],
         "guards": {str(n): ["g"] for n in NODES.values()},
@@ -61,8 +65,10 @@ class Journey:
         self.script = []
         self.resolves = {}
         self.act_error = None
+        self.page_args = {}
+        self.stale_after = None  # A node whose execution is followed by one stale observation.
         self.browser = Mock()
-        self.browser.observe.side_effect = lambda **_kw: page()
+        self.browser.observe.side_effect = self.observe
         self.browser.fresh.return_value = True
         self.browser.evaluate.return_value = "https://example.test/"
         self.browser.screenshot.return_value = ""
@@ -77,6 +83,12 @@ class Journey:
         monkeypatch.setattr(loop, "Browser", Mock(return_value=self.browser))
         monkeypatch.setattr(loop, "choose", self.choose)
         monkeypatch.setattr(loop, "field_text", self.field_text)
+
+    def observe(self, **_kw):
+        if self.stale_after is not None and self.stale_after in [e[0] for e in self.executed]:
+            self.stale_after = None
+            raise StalePage("Page did not settle")
+        return page(**self.page_args)
 
     def resolve(self, locator, node=False):
         name = locator["name"]
@@ -117,6 +129,7 @@ class Journey:
 
     def agent(self, name, **kwargs):
         kwargs.setdefault("values", {"query": "dune"})
+        kwargs.setdefault("urls", {"home": "https://example.test/"})
         kwargs.setdefault("evidence_dir", self.tmp_path / name)
         kwargs.setdefault("evidence_capture", False)
         agent = Agent("https://example.test/", kwargs.pop("goals", None) or self.steps(), **kwargs)
@@ -136,6 +149,15 @@ class Journey:
 
     def record(self, name="recorded"):
         self.script = [("f10", "TYPE_TEXT", "query"), ("c20", "CLICK"), ("c40", "CLICK"), ("c50", "CLICK")]
+        agent = self.agent(name)
+        final = self.run(agent)
+        assert final["status"] == "done" and final["verified"], final["stop_reason"]
+        self.reset()
+        return self.tmp_path / name / "trace.jsonl"
+
+    def record_controls(self, *controls, name="recorded"):
+        """Record step 1 as `controls` (choice, operation pairs) then fill + Go; the other steps as usual."""
+        self.script = [*controls, ("f10", "TYPE_TEXT", "query"), ("c20", "CLICK"), ("c40", "CLICK"), ("c50", "CLICK")]
         agent = self.agent(name)
         final = self.run(agent)
         assert final["status"] == "done" and final["verified"], final["stop_reason"]
@@ -300,8 +322,9 @@ def test_resolve_results_map_to_the_matching_action_or_a_cause():
     assert replay.element_action(P("hover", "x"), actions, 5) == (None, "kind_not_offered")
     twice = actions + [{"id": "a2", "kind": "click", "node": 5, "label": "A again"}]
     assert replay.element_action(P("click", "x"), twice, 5) == (None, "ambiguous")
-    assert replay.control_action(P("key", "key:Enter"), [{"id": "key:Enter", "kind": "key"}])[0]["id"] == "key:Enter"
-    assert replay.control_action(P("key", "key:Tab"), [{"id": "key:Enter", "kind": "key"}]) == (
+    key = P("key", "key:Enter", focus_recorded=True)
+    assert replay.control_action(key, [{"id": "key:Enter", "kind": "key"}])[0]["id"] == "key:Enter"
+    assert replay.control_action(P("key", "key:Tab", focus_recorded=True), [{"id": "key:Enter", "kind": "key"}]) == (
         None,
         "control_not_offered",
     )
@@ -448,7 +471,7 @@ def test_recorded_actions_that_are_spent_without_the_checks_holding_heal(journey
 
     journey.browser.act.side_effect = act
     journey.script = [("c40", "CLICK")]
-    agent, final = journey.replay(trace, stuck_after=10)  # The fake page never changes.
+    agent, final = journey.replay(trace)  # The fake page never changes: the stuck rule must not end a replay.
     assert agent.replay.causes == {1: "checks_unmet"}
     assert final["status"] == "done" and journey.asked == ["Open the second result"]
     assert sources(final) == ["replay", "replay", "replay", "model", "replay"]
@@ -565,3 +588,301 @@ def test_replay_waits_run_in_code(journey):
     _agent, final = journey.replay(events)
     assert final["status"] == "done" and journey.asked == []
     assert [h["kind"] for h in final["history"]].count("wait") == 1
+
+
+def test_a_page_that_stops_reacting_diverges_instead_of_ending_blocked(journey):
+    trace = journey.record()
+    original = journey.act
+
+    def act(action, page_, text=None):
+        if action.get("node") == 40:
+            journey.executed.append((40, "click", None))  # Executed, but nothing changes: the checks stay unmet.
+            return {"executed": action["id"]}
+        return original(action, page_, text)
+
+    journey.browser.act.side_effect = act
+    _agent, final = journey.replay(trace, heal=False)
+    # fill, Go (unchanged page) and the dead click are three unchanged actions in a row: the model loop would call it
+    # blocked, a replay calls it what it is.
+    assert final["status"] == "diverged" and final["stop_reason"] == "checks_unmet at step 2"
+    assert [h["kind"] for h in final["history"]] == ["fill", "click", "click"]
+
+
+def optimistic(journey):
+    """Step 2 holds once and not again, like a press an optimistic UI applied and a server took back."""
+    calls = []
+
+    def flaky(_page):
+        calls.append(1)
+        return journey.flags["opened"] and len(calls) != 2
+
+    goals = journey.steps()
+    goals[1] = Step(goals[1].goal, expect=expect.check(flaky, "opened", auto=True))
+    return goals
+
+
+def test_checks_that_do_not_stay_held_heal_a_replay_instead_of_rejecting_it(journey):
+    trace = journey.record()
+    journey.script = [("c40", "CLICK")]
+    agent, final = journey.replay(trace, goals=optimistic(journey))
+    assert final["status"] == "done" and final["verified"] and journey.asked == ["Open the second result"]
+    assert agent.replay.causes == {1: "checks_unstable"}
+    assert "done_rejected" not in [h["kind"] for h in final["history"]]
+    events = load_trace(journey.tmp_path / "replayed" / "trace.jsonl")
+    assert not [e for e in events if e["type"] == "done_rejected"]
+
+
+def test_checks_that_do_not_stay_held_end_a_replay_diverged_without_heal(journey):
+    trace = journey.record()
+    _agent, final = journey.replay(trace, goals=optimistic(journey), heal=False)
+    assert final["status"] == "diverged" and final["stop_reason"] == "checks_unstable at step 2"
+    assert "done_rejected" not in [h["kind"] for h in final["history"]] and journey.asked == []
+
+
+# --- trace schema 2 reads schema 1 -----------------------------------------------------------------------------
+
+
+def as_schema_1(events):
+    """What a schema 1 writer produced: no heal events, and none of the action fields schema 2 added."""
+    old = []
+    for event in events:
+        if event["type"] == "heal":
+            continue
+        event = dict(event)
+        if event["type"] == "run_start":
+            event["trace_schema"] = 1
+        if event["type"] == "action":
+            for name in ("step", "source", "option", "delta", "focus"):
+                event.pop(name, None)
+        old.append(event)
+    return old
+
+
+def test_a_schema_1_trace_still_loads_and_replays(journey, tmp_path):
+    from jev_ultrafast import trace as traces
+
+    assert traces.SCHEMA == 2 and traces.READABLE == (1, 2)
+    old = as_schema_1(load_trace(journey.record()))
+    path = tmp_path / "old.jsonl"
+    path.write_text("".join(json.dumps(e) + "\n" for e in old))
+    assert load_trace(path)[0]["trace_schema"] == 1
+    _agent, final = journey.replay(path)
+    assert final["status"] == "done" and final["verified"] and journey.asked == []
+    assert sources(final) == ["replay"] * 4
+
+
+def test_a_heal_event_in_a_schema_1_trace_is_an_error(journey, tmp_path):
+    events = as_schema_1(load_trace(journey.record()))
+    heal = {"type": "heal", "t_ms": 1, "step": 0, "cause": "x", "healed": False, "model_calls": 0}
+    events.insert(-1, heal)
+    path = tmp_path / "bad.jsonl"
+    path.write_text("".join(json.dumps(e) + "\n" for e in events))
+    with pytest.raises(ValueError, match="heal is a trace_schema 2 event"):
+        load_trace(path)
+    with pytest.raises(ValueError, match="heal is a trace_schema 2 event"):
+        journey.agent("x", replay=events)
+    events[0]["trace_schema"] = 3
+    path.write_text("".join(json.dumps(e) + "\n" for e in events))
+    with pytest.raises(ValueError, match="readable: 1, 2"):
+        load_trace(path)
+    with pytest.raises(ValueError, match="trace_schema 1 or 2"):
+        journey.agent("y", replay=events)
+
+
+def test_the_plan_carries_what_schema_2_added():
+    from jev_ultrafast import replay
+
+    base = {"type": "action", "t_ms": 1, "index": 1, "label": "x", "locator": None, "text_source": None, "text": None,
+            "result": None}
+    events = [
+        {"type": "step", "t_ms": 0, "index": 0, "status": "active"},
+        {**base, "kind": "key", "choice": "key:Enter", "focus": None},
+        {**base, "kind": "key", "choice": "key:Tab"},
+        {**base, "kind": "goto", "choice": "goto:home", "url": "https://example.test/"},
+        {**base, "kind": "scroll", "choice": "scroll_down", "delta": 560},
+    ]
+    keys, tab, goto, scroll = replay.plan(events, 1)[0]
+    assert keys.focus_recorded and keys.focus is None and not tab.focus_recorded
+    assert goto.url == "https://example.test/" and scroll.delta == 560
+
+
+# --- a replayed action is never executed twice ----------------------------------------------------------------
+
+
+def test_a_stale_observation_after_an_executed_action_never_executes_it_again(journey):
+    trace = journey.record()
+    journey.stale_after = 20  # The page does not settle right after Go ran.
+    _agent, final = journey.replay(trace)
+    assert final["status"] == "done" and final["verified"] and journey.asked == []
+    assert journey.executed.count((20, "click", None)) == 1
+    assert journey.executed == [(10, "fill", "dune"), (20, "click", None), (40, "click", None), (50, "click", None)]
+
+
+def test_a_refusal_before_input_is_looked_at_again_and_executes_once(journey):
+    trace = journey.record()
+    journey.act_error = [None, Refused("covered")]  # The fill runs; Go is refused once before any input.
+    _agent, final = journey.replay(trace)
+    assert final["status"] == "done" and journey.asked == []
+    assert journey.executed.count((20, "click", None)) == 1
+    refusals = [e for e in load_trace(journey.tmp_path / "replayed" / "trace.jsonl") if e["type"] == "refused"]
+    assert len(refusals) == 1
+
+
+# --- a key goes where it went ---------------------------------------------------------------------------------
+
+
+MOVED = {"role": "button", "label": "Delete", "href": None, "tag": "button", "type": None}
+
+
+def test_a_recorded_key_is_pressed_only_on_the_element_that_had_focus(journey):
+    journey.page_args = {"focus": FOCUS}
+    trace = journey.record_controls(("key:Enter", "PRESS_KEY"))
+    key = next(e for e in load_trace(trace) if e["type"] == "action" and e["kind"] == "key")
+    assert key["focus"] == FOCUS
+
+    _agent, final = journey.replay(trace)
+    assert final["status"] == "done" and journey.asked == [] and (None, "key", None) in journey.executed
+
+    journey.reset()
+    journey.page_args = {"focus": MOVED}
+    journey.script = [("f10", "TYPE_TEXT", "query"), ("c20", "CLICK")]
+    agent, final = journey.replay(trace, name="moved")
+    assert agent.replay.causes == {0: "focus_changed"} and final["status"] == "done"
+    assert not [e for e in journey.executed if e[1] == "key"]
+    assert journey.asked == ["Search for dune"] * 2
+
+    journey.reset()
+    _agent, final = journey.replay(trace, name="stopped", heal=False)
+    assert final["status"] == "diverged" and final["stop_reason"] == "focus_changed at step 1"
+    assert journey.executed == [] and journey.asked == []
+
+
+def test_a_key_without_a_recorded_focus_always_heals(journey):
+    journey.page_args = {"focus": FOCUS}
+    old = as_schema_1(load_trace(journey.record_controls(("key:Enter", "PRESS_KEY"))))
+    _agent, final = journey.replay(old, heal=False)
+    assert final["status"] == "diverged" and final["stop_reason"] == "focus_changed at step 1"
+    assert journey.executed == []
+
+    journey.reset()
+    journey.page_args = {}  # Even where nothing has focus now: a schema 1 trace never said where the key went.
+    _agent, final = journey.replay(old, name="unfocused", heal=False)
+    assert final["status"] == "diverged" and final["stop_reason"] == "focus_changed at step 1"
+
+
+def test_no_focus_then_and_now_is_the_same_focus(journey):
+    trace = journey.record_controls(("key:Enter", "PRESS_KEY"))  # Nothing had focus.
+    _agent, final = journey.replay(trace)
+    assert final["status"] == "done" and journey.asked == []
+
+
+# --- goto and scroll -------------------------------------------------------------------------------------------
+
+
+def test_goto_opens_only_the_url_it_opened(journey):
+    trace = journey.record_controls(("goto:home", "GOTO"))
+    _agent, final = journey.replay(trace)
+    assert final["status"] == "done" and journey.asked == []
+
+    journey.reset()
+    journey.page_args = {"goto_url": "https://staging.example.test/"}
+    _agent, final = journey.replay(trace, name="elsewhere", heal=False)
+    assert final["status"] == "diverged" and final["stop_reason"] == "goto_url_changed at step 1"
+    assert journey.executed == []
+
+    journey.reset()
+    journey.script = [("f10", "TYPE_TEXT", "query"), ("c20", "CLICK")]
+    agent, final = journey.replay(trace, name="healed")
+    assert agent.replay.causes == {0: "goto_url_changed"} and final["status"] == "done"
+
+
+def test_goto_compares_query_keys_not_values():
+    from jev_ultrafast import replay
+
+    page_ = [{"id": "goto:home", "kind": "goto", "url": "https://example.test/a?t=2&u=1"}]
+    same = replay.Planned("goto", "goto:home", url="https://example.test/a?t=<redacted>&u=<redacted>")
+    other = replay.Planned("goto", "goto:home", url="https://example.test/a?t=<redacted>&v=<redacted>")
+    assert replay.control_action(same, page_)[1] is None
+    assert replay.control_action(other, page_) == (None, "goto_url_changed")
+
+
+def test_a_scroll_replays_the_distance_it_scrolled(journey):
+    trace = journey.record_controls(("scroll_down", "SCROLL_DOWN"))
+    _agent, final = journey.replay(trace)
+    assert final["status"] == "done" and journey.asked == []
+
+    journey.reset()
+    journey.page_args = {"delta": 400}
+    _agent, final = journey.replay(trace, name="shorter", heal=False)
+    assert final["status"] == "diverged" and final["stop_reason"] == "scroll_changed at step 1"
+    assert journey.executed == []
+
+
+# --- matching guards -------------------------------------------------------------------------------------------
+
+
+def test_a_select_without_a_recorded_option_heals():
+    from jev_ultrafast import replay
+
+    actions = [{"id": "o", "kind": "select", "node": 7, "value": None, "label": "x"}]
+    planned = replay.Planned("select", "o", option=None)
+    assert replay.element_action(planned, actions, 7) == (None, "option_unavailable")
+
+
+def test_a_value_whose_secrecy_changed_is_not_replayed(journey):
+    trace = journey.record()
+    with pytest.raises(ValueError, match="replay_mismatch: value secrecy differs"):
+        journey.agent("a", replay=trace, values={"query": Value("dune-secret", secret=True)})
+    secret = journey.agent("b", values={"query": Value("dune-secret", secret=True)})
+    secret.close()
+
+
+# --- replay-only shorter quiet window --------------------------------------------------------------------------
+
+
+QUIET = {"inflight": 0, "new_started": 0, "timers": 0}
+
+
+def quiet_windows(journey, activity, **kwargs):
+    trace = journey.record()
+    journey.browser.action_settle_quiet_ms = 150
+    journey.browser.activity.return_value = activity
+    journey.browser.settled.reset_mock()
+    _agent, final = journey.replay(trace, **kwargs)
+    assert final["status"] == "done"
+    return [call.kwargs.get("quiet_ms") for call in journey.browser.settled.call_args_list]
+
+
+def test_a_replay_waits_the_short_window_when_nothing_could_change_the_page(journey):
+    assert quiet_windows(journey, QUIET) == [150, 150, 150]
+
+
+@pytest.mark.parametrize("busy", [{"inflight": 1}, {"new_started": 2}, {"timers": 1}])
+def test_a_replay_keeps_the_full_window_when_a_request_or_timer_is_pending(journey, busy):
+    assert quiet_windows(journey, {**QUIET, **busy}) == [None, None, None]
+
+
+def test_a_replay_keeps_the_full_window_for_a_check_that_is_not_cheap(journey):
+    plain = [Step(s.goal, expect=expect.check(lambda _p: True, "x")) for s in journey.steps()]
+    assert Step is not None and plain
+    journey.browser.activity.return_value = QUIET
+    journey.browser.action_settle_quiet_ms = 150
+    agent = journey.agent("manual", goals=journey.steps())
+    agent.state["page"] = agent.observe()
+    agent.state["plan_index"] = 0
+    agent.replay = None
+    assert agent.quiet_replay() is False  # Not a replay at all: a model run keeps its verification contract.
+
+
+def test_a_replay_keeps_the_full_window_when_the_post_action_settle_is_off(journey):
+    journey.browser.action_settle_timeout_ms = 0
+    assert quiet_windows(journey, QUIET) == [None, None, None]
+
+
+def test_a_model_run_never_gets_the_short_window(journey):
+    journey.script = [("f10", "TYPE_TEXT", "query"), ("c20", "CLICK"), ("c40", "CLICK"), ("c50", "CLICK")]
+    journey.browser.activity.return_value = QUIET
+    journey.browser.action_settle_quiet_ms = 150
+    final = journey.run(journey.agent("model"))
+    assert final["status"] == "done"
+    assert all("quiet_ms" not in call.kwargs for call in journey.browser.settled.call_args_list)

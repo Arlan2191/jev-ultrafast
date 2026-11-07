@@ -7,7 +7,8 @@ and map a re-resolved locator to the action the current page offers. The agent l
 from dataclasses import dataclass
 from pathlib import Path
 
-from .trace import SCHEMA, load_trace, validate_event
+from .evidence import redact_url
+from .trace import READABLE, load_trace, validate_event
 
 ELEMENT = {"click", "fill", "select", "hover"}
 CONTROL = {"key", "back", "reload", "goto", "scroll", "wait"}
@@ -17,6 +18,7 @@ OPERATIONS = {
     "click": "CLICK", "fill": "TYPE_TEXT", "select": "SELECT", "hover": "HOVER", "key": "PRESS_KEY", "goto": "GOTO",
 }
 ACCEPTED_RULES = {"role_name_scope", "test_id", "id"}
+FOCUS_FIELDS = ("role", "label", "tag", "type")
 
 
 def normalise(text):
@@ -35,6 +37,10 @@ class Planned:
     value_name: str | None = None
     option: str | None = None
     truncated: tuple = ()
+    url: str | None = None
+    delta: int | float | None = None
+    focus: dict | None = None
+    focus_recorded: bool = False  # False for a schema 1 trace: it never wrote the focus of a key.
 
     @property
     def operation(self):
@@ -48,10 +54,13 @@ def load(source):
     if not isinstance(source, list | tuple) or not source:
         raise ValueError("replay must be a trace.jsonl path or a list of loaded trace events")
     events = list(source)
+    schema = events[0].get("trace_schema") if isinstance(events[0], dict) else None
+    if not isinstance(events[0], dict) or events[0].get("type") != "run_start" or schema not in READABLE:
+        raise ValueError(
+            f"a trace starts with run_start and trace_schema {' or '.join(map(str, READABLE))}"
+        )
     for number, event in enumerate(events, 1):
-        validate_event(event, number)
-    if events[0]["type"] != "run_start" or events[0].get("trace_schema") != SCHEMA:
-        raise ValueError(f"a trace starts with run_start and trace_schema {SCHEMA}")
+        validate_event(event, number, schema)
     return events
 
 
@@ -62,6 +71,11 @@ def require_verified(events):
         raise ValueError(
             f"replay_requires_verified: only a trace that ended done with every step verified can be replayed ({found})"
         )
+
+
+def secrecy(values):
+    """{name: secret flag}: a trace stores the flag, the caller's Value has `.secret`."""
+    return {name: bool(getattr(v, "secret", v)) for name, v in (values or {}).items()}
 
 
 def match(events, steps, values):
@@ -78,8 +92,12 @@ def match(events, steps, values):
             raise ValueError(f"replay_mismatch: step {number} checks differ from the trace")
         if set(old.get("values") or {}) != set(step.values):
             raise ValueError(f"replay_mismatch: step {number} value names differ from the trace")
+        if secrecy(old.get("values")) != secrecy(step.values):
+            raise ValueError(f"replay_mismatch: step {number} value secrecy differs from the trace")
     if set(start["values"]) != set(values):
         raise ValueError("replay_mismatch: value names differ from the trace")
+    if secrecy(start["values"]) != secrecy(values):
+        raise ValueError("replay_mismatch: value secrecy differs from the trace")
 
 
 def plan(events, count):
@@ -101,6 +119,10 @@ def plan(events, count):
                         value_name=event.get("value_name"),
                         option=event.get("option"),
                         truncated=tuple(event.get("truncated") or ()),
+                        url=event.get("url"),
+                        delta=event.get("delta"),
+                        focus=event.get("focus"),
+                        focus_recorded="focus" in event,
                     )
                 )
     return steps
@@ -143,6 +165,8 @@ def element_action(planned, actions, node):
     if planned.kind == "hover":
         found = [a for a in same if hoverable(a)]
     elif planned.kind == "select":
+        if planned.option is None:
+            return None, "option_unavailable"  # A schema 1 trace did not record which option.
         found = [a for a in same if a["kind"] == "select" and a.get("value") == planned.option]
     else:
         found = [a for a in same if a["kind"] == planned.kind]
@@ -151,11 +175,30 @@ def element_action(planned, actions, node):
     return found[0], None
 
 
-def control_action(planned, actions):
+def focus_of(focus):
+    """The fields of a focused element a replay compares (the recorded `focus` and the page's `focus` alike)."""
+    return {k: (focus or {}).get(k) for k in FOCUS_FIELDS} if focus else None
+
+
+def control_action(planned, actions, focus=None):
     """(the page's action, None) for a recorded key, back, reload, goto, scroll or wait, or (None, cause). The id
-    carries the key chord, the declared page name or the direction, so one lookup by id checks the declaration."""
+    carries the key chord, the declared page name or the direction, so one lookup by id checks the declaration. A
+    goto must open the URL it opened (query values aside), a scroll the distance it scrolled, and a key goes to the
+    element that had focus when it was recorded: `focus` is the page's focus now."""
     found = [a for a in actions if a["id"] == planned.choice and a["kind"] == planned.kind]
-    return (found[0], None) if len(found) == 1 else (None, "control_not_offered")
+    if len(found) != 1:
+        return None, "control_not_offered"
+    action = found[0]
+    if planned.kind == "goto" and redact_url(planned.url) != redact_url(action.get("url")):
+        return None, "goto_url_changed"
+    if planned.kind == "scroll" and planned.delta != action.get("delta"):
+        return None, "scroll_changed"
+    if planned.kind == "key":
+        if not planned.focus_recorded:
+            return None, "focus_changed"
+        if focus_of(planned.focus) != focus_of(focus):
+            return None, "focus_changed"
+    return action, None
 
 
 def fill_text(planned, values):
