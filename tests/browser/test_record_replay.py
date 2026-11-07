@@ -227,7 +227,7 @@ def test_a_reordered_list_heals_and_never_opens_the_row_now_in_the_recorded_posi
     assert lab.clicked(again) == ["b"]  # Not "a", which sits where "b" was.
     again.close()
     heal = next(e for e in load_trace(lab.trace(again)) if e["type"] == "heal")
-    assert heal["cause"] == "ambiguous" and heal["step"] == 1
+    assert heal["cause"] == "digest_changed" and heal["step"] == 1
 
 
 def test_a_key_is_not_pressed_on_another_element_than_the_recorded_one(lab):

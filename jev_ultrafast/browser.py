@@ -208,6 +208,8 @@ class Browser:
             return None
         if not node:
             del found["node"]
+        if not found["digest_changed"]:
+            del found["digest_changed"]  # Only present when the digest was the reason for "ambiguous".
         return found
 
     def observe(self, screenshot=True):

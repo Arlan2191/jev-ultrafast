@@ -196,10 +196,12 @@
     };
   };
   // Does the element still look like the one that was recorded: same tag, same type, same role (when recorded), the
-  // same clipped accessible name and, for anything that has text, the same clipped text.
+  // same clipped accessible name, for anything that has text the same clipped text and, for a link whose recorded
+  // href is known, the same target (path and query keys: query values are redacted in a trace).
   const verifies = (e, loc) => !!e && e.tagName.toLowerCase()===loc.tag && (e.type ?? null)===(loc.type ?? null) &&
     (!loc.role || role(e)===loc.role) && (loc.name===undefined || clip(name(e))===loc.name) &&
-    (typeof loc.text!=='string' || textOf(e)===loc.text);
+    (typeof loc.text!=='string' || textOf(e)===loc.text) &&
+    (typeof loc.href!=='string' || hrefKey(loc.href)===hrefKey(linkOf(e, true)));
   // The element a recorded locator points at on the page as it is now, or null; never another element.
   // {element, rule, unique, count_match, verified}. The primary rule (role_name_scope) takes the role + name matches
   // inside the scope (itself found by role + name + ordinal) and accepts one only when the recorded in-scope count
