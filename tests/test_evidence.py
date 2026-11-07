@@ -565,7 +565,12 @@ def test_closing_the_agent_stops_the_event_thread(monkeypatch, tmp_path):
     agent.evidence.attach("T", environ={"BU_CDP_WS": "ws://x"}, events=lambda *a, **k: CdpEvents(
         *a, connect=lambda *_a, **_k: socket, **k))
     assert agent.evidence.capture["console"] is True and THREAD_NAME in [t.name for t in threading.enumerate()]
+    socket.push(event("Runtime.consoleAPICalled", type="error", args=[{"type": "string", "value": "kaboom"}]))
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not agent.evidence.stream.snapshot()[0]:
+        time.sleep(0.01)
     agent.close()
+    assert "kaboom" in (tmp_path / "run" / "report.html").read_text()
     assert THREAD_NAME not in [t.name for t in threading.enumerate()] and socket.closed
     for name in ("console.jsonl", "network.jsonl", "network.har", "report.html", "trace.jsonl"):
         assert (tmp_path / "run" / name).exists()
@@ -586,7 +591,6 @@ def test_every_event_and_the_report_pass_through_the_scrub_given_to_evidence(tmp
     evidence = Evidence(tmp_path / "e", clean=lambda value: json.loads(json.dumps(value).replace("TOPSECRET", "<x>")))
     evidence.event("step", index=0, status="active", note="a TOPSECRET b", nested={"k": ["TOPSECRET"]})
     evidence.event("run_end", status="done", stop_reason=None, verified=False, totals={}, screenshot=None)
-    evidence.events[0]["note"] = "a TOPSECRET b"  # The report must clean what it renders, whatever was kept.
     evidence.close()
     assert "TOPSECRET" not in (tmp_path / "e" / "trace.jsonl").read_text()
     assert "<x>" in (tmp_path / "e" / "trace.jsonl").read_text()
