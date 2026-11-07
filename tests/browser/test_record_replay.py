@@ -701,6 +701,71 @@ def test_a_positional_test_id_never_clicks_the_other_named_row(lab):
     assert lab.clicked(again) == ["alice"] and chooser.calls == []
 
 
+SCOPE_GOALS = [Step("Search for it", expect=expect.text("Typed s1"))]
+SHELL_INPUT = "window.__jevFast.ids.get(document.querySelector('[data-m=s1]'))"
+
+
+def scope_chooser():
+    def chooser(page, goal, history, **extra):
+        chooser.calls.append(goal)
+        if chooser.forbid:
+            raise AssertionError("the model was asked during a replay")
+        node = chooser.agent.browser.evaluate(SHELL_INPUT)
+        choice = next(a["id"] for a in page["actions"] if a.get("node") == node)
+        return {
+            "choice": choice, "operation": "TYPE_TEXT", "target": "1", "value": "query", "confidence": 1.0,
+            "probabilities": {choice: 1.0}, "latency_ms": 1, "usage": {},
+        }
+
+    chooser.forbid, chooser.agent = False, None
+    return chooser
+
+
+def record_in_shells(lab):
+    chooser = scope_chooser()
+    agent, state, _model, _wall = lab.run(url="replay_testid_scope.html", goals=SCOPE_GOALS, chooser=chooser)
+    assert state["status"] == "done" and agent.browser.evaluate("window.__typed")[-1] == "s1"
+    locator = next(e for e in load_trace(lab.trace(agent)) if e["type"] == "action")["locator"]
+    assert locator["test_id"] == "search" and locator["test_id_unique"] is True
+    assert locator["scope"]["count"] == 2 and locator["scope"]["ordinal"] == 0
+    agent.close()
+    return chooser, agent
+
+
+def test_a_unique_test_id_in_a_repeated_same_named_scope_replays_without_the_model(lab):
+    chooser, agent = record_in_shells(lab)
+    chooser.forbid = True  # Another total on this load: the digest differs, the test id still names it.
+    chooser.calls.clear()
+    again, replayed, _model, _wall = lab.run(
+        url="replay_testid_scope.html", goals=SCOPE_GOALS, chooser=chooser, replay=lab.trace(agent), heal=False
+    )
+    assert replayed["status"] == "done", replayed["stop_reason"]
+    assert set(sources(replayed)) == {"replay"} and chooser.calls == []
+    assert again.browser.evaluate("window.__typed")[-1] == "s1"
+    assert replayed["replay"]["model_calls"] == 0 and replayed["replay"]["steps_healed"] == 0
+
+
+def test_a_third_same_named_scope_is_not_resolved_by_the_test_id_and_heals(lab):
+    chooser, agent = record_in_shells(lab)
+    again, healed, _model, _wall = lab.run(
+        url="replay_testid_scope.html?variant=three", goals=SCOPE_GOALS, chooser=chooser, replay=lab.trace(agent)
+    )
+    assert healed["status"] == "done" and set(again.browser.evaluate("window.__typed")) == {"s1"}
+    again.close()
+    assert any(e["type"] == "heal" for e in load_trace(lab.trace(again)))
+
+
+def test_a_test_id_moved_into_the_other_same_named_scope_is_not_followed(lab):
+    chooser, agent = record_in_shells(lab)
+    again, healed, _model, _wall = lab.run(
+        url="replay_testid_scope.html?variant=moved", goals=SCOPE_GOALS, chooser=chooser, replay=lab.trace(agent)
+    )
+    # The test id is in the second landmark now: test_id_first never types there; the step heals onto the first.
+    assert healed["status"] == "done" and set(again.browser.evaluate("window.__typed")) == {"s1"}
+    again.close()
+    assert any(e["type"] == "heal" for e in load_trace(lab.trace(again)))
+
+
 def test_known_residual_a_test_id_moved_onto_a_look_alike_while_the_container_text_changed(lab):
     chooser = testid_chooser()
     agent, state, _model, _wall = lab.run(url="replay_testid.html?variant=live", goals=TESTID_GOALS, chooser=chooser)

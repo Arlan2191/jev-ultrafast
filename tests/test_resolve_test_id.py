@@ -79,3 +79,27 @@ def test_a_test_id_moved_onto_a_same_name_look_alike_is_a_refusal():
 def test_a_unique_test_id_wins_when_the_look_alikes_container_text_changed():
     found = resolve(adds("a"), adds("a", text="Price 2"), "a")
     assert found == {"rule": "test_id_first", "m": "a"}
+
+
+def shells(tid_in=1, text="Total 1", count=2):
+    """Responsive duplicate layout: `count` same-named main landmarks, each with a same-named search box."""
+    def one(i):
+        tid = ' data-testid="search"' if i == tid_in else ""
+        return f'<main aria-label="Shell"><p>{text}</p><input aria-label="Search" data-m="s{i}"{tid}></main>'
+
+    return "".join(one(i) for i in range(1, count + 1))
+
+
+def test_a_unique_test_id_resolves_inside_a_repeated_same_named_scope():
+    found = resolve(shells(), shells(text="Total 2"), "s1")
+    assert found == {"rule": "test_id_first", "m": "s1"}
+
+
+def test_a_changed_scope_count_is_not_resolved_by_the_test_id():
+    found = resolve(shells(), shells(text="Total 2", count=3), "s1")
+    assert found["rule"] != "test_id_first"
+
+
+def test_a_test_id_that_moved_into_the_other_same_named_scope_is_not_resolved_by_it():
+    found = resolve(shells(), shells(tid_in=2, text="Total 2"), "s1")
+    assert found["rule"] != "test_id_first" and found["m"] != "s2"

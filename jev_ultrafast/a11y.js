@@ -255,10 +255,13 @@
     };
     // A test id is an identity the page author placed. Unique when recorded and unique now, on an element that still
     // has the recorded tag, type, role, name and text (and link target), not under a scope that had siblings of its
-    // kind, and, with a scope, inside the scope found by role + name + ordinal: then it is the same element, whatever
+    // kind (or one whose count is unchanged), and, with a scope, inside the scope found by role + name + ordinal: then it is the same element, whatever
     // the look-alikes' container shows now. The primary rule is still consulted: when it resolves a different verified
     // element the two disagree and the answer is a refusal, never the test id. Anything else falls through.
-    if (loc.test_id && loc.test_id_unique===true && (!loc.scope || loc.scope.count===1)) {
+    // A repeated scope (count > 1) qualifies only while the number of scopes with the recorded role + name is unchanged;
+    // the in-scope check below then pins the hit to the recorded ordinal.
+    const scopeOk = !loc.scope || loc.scope.count===1 || (loc.scope.count>1 && scopesLike(loc.scope).length===loc.scope.count);
+    if (loc.test_id && loc.test_id_unique===true && scopeOk) {
       const hits = withTestId(loc.test_id);
       if (hits.length===1 && verifies(hits[0], loc)) {
         const scopeEl = loc.scope ? (scopesLike(loc.scope)[loc.scope.ordinal ?? 0] ?? null) : null;
