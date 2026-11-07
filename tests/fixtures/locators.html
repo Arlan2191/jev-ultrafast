@@ -157,7 +157,7 @@
     if (variant === 'T2') document.querySelector('[aria-label="Solo old"]').setAttribute('aria-label', 'Solo new');
     // T3: Ann's row goes; Bob's Delete has the same (shared) test id.
     if (variant === 'T3') drop('t3a');
-    // U: Deal A goes and its stable id moves to Deal B's button.
+    // U: the first of two Deal scopes goes and its stable id moves to Deal B's button.
     if (variant === 'U') {
       drop('ua');
       at('ub').id = 'take-now';
