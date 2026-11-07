@@ -31,7 +31,7 @@ async function call(name, body = {}) {
   return data;
 }
 function controls() {
-  const live = state?.page && !["done", "blocked", "denied", "budget", "failed"].includes(state.status);
+  const live = state?.page && !["done", "blocked", "denied", "budget", "failed", "diverged"].includes(state.status);
   $("start").disabled = busy;
   $("scenario").disabled = busy;
   $("goal").disabled = busy;
@@ -184,7 +184,7 @@ $("auto").addEventListener("click", () =>
       } else {
         await call("tick");
       }
-      if (["done", "blocked", "denied", "budget", "failed"].includes(state.status)) break;
+      if (["done", "blocked", "denied", "budget", "failed", "diverged"].includes(state.status)) break;
     }
     automatic = false;
   }, "Running the browser…"),

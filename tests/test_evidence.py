@@ -106,7 +106,7 @@ def test_a_run_writes_a_trace_that_reads_back_and_ends_with_totals_that_match_th
     assert kinds[0] == "run_start" and kinds[-1] == "run_end" and kinds.count("run_end") == 1
     assert {"observe", "action", "step"} <= set(kinds)
     start, action, end = events[0], next(e for e in events if e["type"] == "action"), events[-1]
-    assert start["trace_schema"] == trace.SCHEMA == 1 and start["browser"]["product"] == "HeadlessChrome/130"
+    assert start["trace_schema"] == trace.SCHEMA == 2 and start["browser"]["product"] == "HeadlessChrome/130"
     assert start["steps"][0]["goal"] == "click go" and start["config"]["max_steps"] == 5
     assert action["kind"] == "click" and action["label"] == "Go" and action["locator"] == LOCATOR
     assert action["result"] == {"executed": "x"} and action["index"] == 1
@@ -180,7 +180,8 @@ def test_an_evidence_dir_that_holds_files_is_refused(monkeypatch, tmp_path):
         "",
         "not json\n",
         '{"type": "observe", "t_ms": 1}\n',
-        '{"type": "run_start", "t_ms": 0, "trace_schema": 2}\n',
+        '{"type": "run_start", "t_ms": 0, "trace_schema": 3}\n',
+        '{"type": "run_start", "t_ms": 0, "trace_schema": true}\n',
     ],
 )
 def test_the_reader_rejects_what_it_does_not_understand(tmp_path, text):

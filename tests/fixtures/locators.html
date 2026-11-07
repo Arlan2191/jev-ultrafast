@@ -91,7 +91,8 @@
   <div id="pr">
     <div contenteditable="true" role="textbox" aria-label="Note" data-m="note">secret-value-123</div>
   </div>
-  <p id="status">idle</p>
+  <!-- Volatile text stays out of the scope digest a locator records for look-alikes: aria-hidden. -->
+  <p id="status" aria-hidden="true">idle</p>
 </main>
 <script>
   {
