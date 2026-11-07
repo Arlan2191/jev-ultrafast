@@ -526,6 +526,7 @@ def test_zero_settle_is_accepted(monkeypatch):
         "body_cap_ms": 30000,
         "wait_ignore_attributes": (),
         "wait_interactive_grace_ms": 2000,
+        "viewport": (1120, 780),
     }
 
 

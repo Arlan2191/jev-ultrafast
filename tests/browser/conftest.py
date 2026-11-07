@@ -127,8 +127,8 @@ def open_page(fixture_base_url):
         pytest.skip(message)
     opened = []
 
-    def open_(name):
-        browser = Browser(f"{fixture_base_url}/{name}")
+    def open_(name, **kwargs):
+        browser = Browser(f"{fixture_base_url}/{name}", **kwargs)
         opened.append(browser)
         return browser
 
