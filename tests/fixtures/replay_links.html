@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Links</title></head>
+<body>
+<p><a href="/a/1" data-id="a1">Read more</a></p>
+<p><a href="/a/2" data-id="a2">Read more</a></p>
+<p><a href="/files/report.pdf" id="download">Download</a></p>
+<p id="out"></p>
+<script>
+  // Enter on a focused link follows it: the click is caught here instead. ?variant=second: link 2 has focus.
+  // ?variant=moved: the Download link keeps its text and points somewhere else.
+  // ?variant=otherhost: it keeps its text and path and points to another host.
+  const variant = new URLSearchParams(location.search).get("variant");
+  window.__opened = [];
+  for (const a of document.querySelectorAll("a")) {
+    a.addEventListener("click", event => {
+      event.preventDefault();
+      window.__opened.push(a.getAttribute("href"));
+      document.getElementById("out").textContent = "Opened " + a.getAttribute("href");
+    });
+  }
+  if (variant === "moved") document.getElementById("download").setAttribute("href", "/files/other.pdf");
+  if (variant === "otherhost") document.getElementById("download").setAttribute("href", "http://other.test/files/report.pdf");
+  document.querySelector(variant === "second" ? '[data-id="a2"]' : '[data-id="a1"]').focus();
+</script>
+</body>
+</html>

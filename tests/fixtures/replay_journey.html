@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Library</title></head>
+<body>
+<main>
+  <h1>Library</h1>
+  <input type="text" aria-label="Search" id="q">
+  <button type="button" onclick="search()">Search</button>
+  <p id="heading"></p>
+  <!-- Rows look alike on purpose: same first text, same button name. Only data-row tells them apart. -->
+  <ul id="results" hidden>
+    <li data-row="a"><span>Dune</span> <small>1965</small> <button type="button" onclick="openRow('a')">Open</button></li>
+    <li data-row="b"><span>Dune</span> <small>1984</small> <button type="button" onclick="openRow('b')">Open</button></li>
+    <li data-row="c"><span>Dune</span> <small>2021</small> <button type="button" onclick="openRow('c')">Open</button></li>
+  </ul>
+  <section id="detail" aria-label="Detail" hidden>
+    <p id="opened"></p>
+    <button type="button" aria-pressed="false" onclick="this.setAttribute('aria-pressed','true')">Pin</button>
+  </section>
+</main>
+<script>
+  // ?variant=renamed: every row button is called View. ?variant=inserted: one more look-alike row comes first.
+  // ?variant=swapped: rows a and b change places (same count, same names, the target is no longer in its position).
+  // ?variant=pin: the Pin button is renamed. window.__clicked lists the rows that were opened, in order.
+  const variant = new URLSearchParams(location.search).get("variant");
+  window.__clicked = [];
+  const results = document.getElementById("results");
+  if (variant === "inserted") {
+    const row = results.firstElementChild.cloneNode(true);
+    row.dataset.row = "new";
+    row.querySelector("button").setAttribute("onclick", "openRow('new')");
+    results.prepend(row);
+  }
+  if (variant === "swapped") results.firstElementChild.before(results.children[1]);
+  if (variant === "renamed") {
+    for (const b of results.querySelectorAll("button")) b.textContent = "View";
+  }
+  if (variant === "pin") document.querySelector("#detail button").textContent = "Pin to board";
+  function search() {
+    document.getElementById("heading").textContent = "Results for " + document.getElementById("q").value.length + " letters";
+    results.hidden = false;
+  }
+  function openRow(id) {
+    window.__clicked.push(id);
+    document.getElementById("opened").textContent = "Opened row " + id;
+    document.getElementById("detail").hidden = false;
+  }
+</script>
+</body>
+</html>

@@ -188,20 +188,29 @@ class Browser:
             " return l ?? {error:'NotInDocument'}; })()"
         )
 
-    def resolve(self, locator):
+    def resolve(self, locator, node=False):
         """The element a recorded locator points at on the page as it is now, or None when nothing matches:
         {"rule", "unique", "count_match", "verified", "tag", "text", "hint"}. Three outcomes: resolved (rule
         role_name_scope, test_id or id, verified, tag and text set); "ambiguous" (several controls matched and the
         recorded counts no longer hold, tag and text None); "hint" (only the recorded css_path still points at
         something: hint is its {tag, text}, it is not the element, show it or ignore it). An element is returned only
-        if its tag, type, role, name and text still match."""
+        if its tag, type, role, name and text still match. node=True adds "node": the id the last observation gave
+        the element (None if that observation did not list it), which is how a replay finds the action to run."""
         found = self.evaluate(
             "(() => { const {resolve, textOf}=" + A11Y + f"; const r=resolve({json.dumps(locator)});"
             " return {rule:r.rule, unique:r.unique, count_match:r.count_match, verified:r.verified,"
-            " hint:r.hint ?? null, tag:r.element ? r.element.tagName.toLowerCase() : null,"
-            " text:r.element ? textOf(r.element) : null}; })()"
+            " hint:r.hint ?? null, digest_changed:r.digest_changed===true,"
+            " tag:r.element ? r.element.tagName.toLowerCase() : null,"
+            " text:r.element ? textOf(r.element) : null,"
+            " node:r.element ? (window.__jevFast?.ids.get(r.element) ?? null) : null}; })()"
         )
-        return found if found["rule"] else None
+        if not found["rule"]:
+            return None
+        if not node:
+            del found["node"]
+        if not found["digest_changed"]:
+            del found["digest_changed"]  # Only present when the digest was the reason for "ambiguous".
+        return found
 
     def observe(self, screenshot=True):
         if getattr(self, "after_input", None):

@@ -1,0 +1,16 @@
+<!doctype html><title>Interval toggle</title>
+<button type="button" aria-pressed="false" onclick="press(this)">Upvote</button>
+<p id="status">Not voted</p>
+<script>
+  // An optimistic UI that takes the press back from a setInterval (the page-side tracker only counts setTimeout), ?revert=<ms> later.
+  const revert = Number(new URLSearchParams(location.search).get("revert") || 420);
+  function press(button) {
+    button.setAttribute("aria-pressed", "true");
+    document.getElementById("status").textContent = "Voted";
+    const timer = setInterval(() => {
+      clearInterval(timer);
+      button.setAttribute("aria-pressed", "false");
+      document.getElementById("status").textContent = "Not voted";
+    }, revert);
+  }
+</script>
