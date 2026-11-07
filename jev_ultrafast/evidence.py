@@ -29,29 +29,39 @@ CLIP = {"text": 2048, "stack": 8192, "url": 2048}
 MAX_FRAME = 8 * 1024 * 1024  # A larger websocket frame closes the connection (reported as capture_lost).
 BUFFERS = {"maxTotalBufferSize": 262144, "maxResourceBufferSize": 65536}  # Network.enable: do not retain bodies.
 THREAD = "jev-evidence-events"
-DOMAINS = ("Runtime.enable", "Log.enable", "Network.enable")
+DOMAINS = ("Runtime.enable", "Log.enable", "Network.enable", "Inspector.enable")
 DROPPED_PART = f"entries between the first {HEAD} and the last {TAIL} of a stream that are not errors"
 REDACTED = "<redacted>"
 URL_KEYS = frozenset({"url", "href", "redirected_to"})
 
 
+WEB_SCHEMES = {"http", "https", "ws", "wss"}
+PATH_PARAM = re.compile(r";([^=;/]*)=[^;/]*")
+
+
 def redact_url(url):
-    """The URL with every query value and the fragment replaced by <redacted> (keys, origin and path kept), the
-    userinfo dropped, and a data: or blob: URL cut to its scheme and mime type."""
+    """The URL with every query value, every ;path parameter value and the fragment replaced by <redacted> (keys,
+    origin and path kept) and the userinfo dropped. A URL that is not http(s) or ws(s) is cut to its scheme (a
+    javascript: payload, a mailto: address); data: keeps its mime type."""
     if not isinstance(url, str):
         return url
-    head = url.lstrip()[:5].lower()
-    if head.startswith("data:"):
-        return "data:" + url.lstrip()[5:].split(",", 1)[0].split(";", 1)[0]
-    if head.startswith("blob:"):
-        return "blob:"
+    url = url.lstrip()
+    scheme = re.match(r"([A-Za-z][A-Za-z0-9+.-]*):(?!\d+(?:/|$))", url)
+    if scheme and scheme.group(1).lower() not in WEB_SCHEMES and not url[scheme.end() :].startswith("//"):
+        name = scheme.group(1).lower()
+        if name == "about":
+            return url.split("#", 1)[0].split("?", 1)[0]
+        return "data:" + url[5:].split(",", 1)[0].split(";", 1)[0] if name == "data" else name + ":"
     base, hash_, fragment = url.partition("#")
     base, mark, query = base.partition("?")
     origin = re.match(r"(?:[A-Za-z][A-Za-z0-9+.-]*:)?//", base)
     if origin:
         authority, slash, path = base[origin.end() :].partition("/")
         if "@" in authority:
-            base = f"{origin.group(0)}{authority.rsplit('@', 1)[1]}{slash}{path}"
+            authority = authority.rsplit("@", 1)[1]
+        base = f"{origin.group(0)}{authority}{slash}{PATH_PARAM.sub(rf';\1={REDACTED}', path)}"
+    else:
+        base = PATH_PARAM.sub(rf";\1={REDACTED}", base)
     if mark:
         pairs = [part.partition("=") for part in query.split("&") if part]
         query = "&".join(f"{key}={REDACTED}" if equals else REDACTED for key, equals, _value in pairs)
@@ -68,7 +78,13 @@ def query_pairs(url):
     ]
 
 
-URL_IN_TEXT = re.compile(r"(?:[A-Za-z][A-Za-z0-9+.-]*://|(?<!\w)(?:data|blob):)[^\s\"'<>)\]]+")
+# In free text: an absolute URL (an IPv6 host in brackets is part of it), a data:/blob:/javascript:/mailto:/tel: URL
+# (whole rest of the word: the payload may contain quotes), or a relative URL that carries a query (/api/me?token=x).
+URL_IN_TEXT = re.compile(
+    r"[A-Za-z][A-Za-z0-9+.-]*://(?:[^\s\"'<>/?#\[\]@]*@)?(?:\[[^\]\s]*\])?[^\s\"'<>)\]]*"
+    r"|(?<!\w)(?:data|blob|javascript|mailto|tel):\S+"
+    r"|[\w/.~%-]*\?[\w%.~-]+=[^\s\"'<>]*"
+)
 
 
 def redact_text(text):
@@ -251,8 +267,7 @@ class CdpEvents:
                 continue
             except Exception as error:
                 if not self.stopping.is_set():  # The browser or the tab went away: say so, do not look clean.
-                    with self.lock:
-                        self.lost_info = {"reason": type(error).__name__, "t_ms": self.now_ms()}
+                    self.mark_lost(type(error).__name__)
                 return
             self.process(raw)
 
@@ -305,8 +320,19 @@ class CdpEvents:
     def console(self, record, error):
         self.console_log.add(cut(record, text="text", stack="stack", url="url"), error)
 
+    def mark_lost(self, reason):
+        with self.lock:
+            if self.lost_info is None:
+                self.lost_info = {"reason": reason, "t_ms": self.now_ms()}
+
     def handle(self, message):
-        if message.get("sessionId") != self.session or "method" not in message:
+        method = message.get("method")
+        # The tab went away while the socket stays open: nothing more will arrive, and "0 errors" would be a lie.
+        if method == "Target.detachedFromTarget" and (message.get("params") or {}).get("sessionId") == self.session:
+            return self.mark_lost("TargetDetached")
+        if method == "Inspector.targetCrashed" and message.get("sessionId") == self.session:
+            return self.mark_lost("TargetCrashed")
+        if message.get("sessionId") != self.session or method is None:
             return
         method, p = message["method"], message.get("params", {})
         with self.lock:

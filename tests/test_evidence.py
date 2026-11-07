@@ -442,7 +442,7 @@ def test_the_connection_attaches_to_its_own_target_enables_domains_and_collects_
     stream.start()
     try:
         assert [m["method"] for m in socket.sent] == [
-            "Target.attachToTarget", "Runtime.enable", "Log.enable", "Network.enable"
+            "Target.attachToTarget", "Runtime.enable", "Log.enable", "Network.enable", "Inspector.enable"
         ]
         assert socket.sent[0]["params"] == {"targetId": "TARGET", "flatten": True}
         assert all(m["sessionId"] == "S1" for m in socket.sent[1:])
@@ -956,3 +956,86 @@ def test_har_entries_conform_to_the_1_2_field_types_and_carry_the_query_keys():
     first = har["log"]["entries"][0]["request"]["queryString"]
     assert first == [{"name": "token", "value": "<redacted>"}, {"name": "q", "value": "<redacted>"}]
     assert har["log"]["entries"][1]["request"]["queryString"] == []
+
+
+# --- fix round 2: non-http URLs, IPv6 and relative URLs in text, path parameters, a tab that dies -----------------
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("javascript:doIt('zzz')", "javascript:"),
+        ("JavaScript:alert(1)", "javascript:"),
+        ("mailto:person@example.com?subject=zzz", "mailto:"),
+        ("tel:+15550100", "tel:"),
+        ("data:text/plain;base64,QUJD-zzz", "data:text/plain"),
+        ("https://h/p;jsessionid=ABC123?x=1", "https://h/p;jsessionid=<redacted>?x=<redacted>"),
+        ("/p;token=SECRET/x;a=1", "/p;token=<redacted>/x;a=<redacted>"),
+        ("http://[::1]:8080/cb?code=zzz", "http://[::1]:8080/cb?code=<redacted>"),
+        ("localhost:8080/x?k=v", "localhost:8080/x?k=<redacted>"),
+    ],
+)
+def test_redact_url_cuts_other_schemes_and_path_parameters(url, expected):
+    assert evidence_module.redact_url(url) == expected
+    assert evidence_module.redact_url(expected) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("TypeError at http://[::1]:8080/cb?code=zzz now", "TypeError at http://[::1]:8080/cb?code=<redacted> now"),
+        ("Fetch failed: /api/me?token=zzz", "Fetch failed: /api/me?token=<redacted>"),
+        ("bad ?key=zzz here", "bad ?key=<redacted> here"),
+        ("href javascript:doIt('zzz') ok", "href javascript: ok"),
+        ("write mailto:p@e.com?subject=zzz now", "write mailto: now"),
+        ("who? nobody", "who? nobody"),
+    ],
+)
+def test_redact_text_covers_ipv6_hosts_relative_urls_and_script_urls(text, expected):
+    out = evidence_module.redact_text(text)
+    assert out == expected and "zzz" not in out
+
+
+def test_a_locator_href_is_clipped_to_the_url_limit():
+    assert len(evidence_module.clipped("x" * 5000, "url")[0]) == evidence_module.CLIP["url"]
+
+
+def test_a_tab_that_crashes_while_the_socket_stays_open_is_a_lost_capture():
+    socket = ScriptedSocket()
+    stream = CdpEvents("ws://browser", "TARGET", connect=lambda url, **_k: socket)
+    stream.start()
+    try:
+        socket.push({"method": "Target.detachedFromTarget", "params": {"sessionId": "OTHER"}})
+        socket.push(event("Log.entryAdded", entry={"source": "other", "level": "info", "text": "still here"}))
+        settle(stream, lambda: len(stream.snapshot()[0]) == 1)
+        assert stream.lost() is None  # Another session going away is not ours.
+        socket.push({"method": "Target.detachedFromTarget", "params": {"sessionId": "S1"}})
+        settle(stream, lambda: stream.lost() is not None)
+        assert stream.lost()["reason"] == "TargetDetached"
+    finally:
+        stream.close()
+    assert stream.lost()["reason"] == "TargetDetached"  # The first reason stays; closing does not clear it.
+
+
+def test_a_renderer_crash_event_is_a_lost_capture():
+    socket = ScriptedSocket()
+    stream = CdpEvents("ws://browser", "TARGET", connect=lambda url, **_k: socket)
+    stream.start()
+    try:
+        socket.push(event("Inspector.targetCrashed"))
+        settle(stream, lambda: stream.lost() is not None)
+        assert stream.lost()["reason"] == "TargetCrashed"
+    finally:
+        stream.close()
+
+
+def test_an_element_outside_the_document_is_a_counted_missing_locator(monkeypatch, tmp_path):
+    agent = make(monkeypatch, tmp_path)
+    agent.fake.browser.locator.return_value = {"error": "NotInDocument"}  # A shadow root or a frame.
+    do(agent, "e3", "CLICK")
+    do(agent)
+    agent.close()
+    events = read(tmp_path / "run" / "trace.jsonl")
+    action = next(e for e in events if e["type"] == "action")
+    assert (action["locator"], action["locator_error"]) == (None, "NotInDocument")
+    assert events[-1]["totals"]["locator_missing"] == 1

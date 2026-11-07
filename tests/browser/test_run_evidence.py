@@ -10,6 +10,7 @@ from pathlib import Path
 
 from jev_ultrafast import Agent, trace
 from jev_ultrafast import agent as loop
+from jev_ultrafast.browser import A11Y
 from jev_ultrafast.evidence import THREAD
 
 
@@ -117,6 +118,14 @@ LOCATOR_PLAN = [
 ]
 
 
+def marker_of(browser, locator):
+    """{"rule", "marker"}: what resolve finds for a locator and the data-m marker of that element (test-only)."""
+    return browser.evaluate(
+        "(() => { const {resolve}=" + A11Y + f"; const r=resolve({json.dumps(locator)});"
+        " return {rule:r.rule, marker:r.element ? r.element.getAttribute('data-m') : null}; })()"
+    )
+
+
 def test_locators_find_the_same_element_again(open_page, fixture_base_url, monkeypatch, tmp_path):
     open_page("blank.html")
     stub(monkeypatch, [step for step, _marker in LOCATOR_PLAN])
@@ -140,16 +149,19 @@ def test_locators_find_the_same_element_again(open_page, fixture_base_url, monke
         # The contract with replay: on a fresh load, each recorded locator resolves to the element it was read from.
         agent.browser.navigate({"kind": "reload"})
         found = [agent.browser.resolve(loc) for loc in locators]
-        assert [f and f["marker"] for f in found] == [marker for _step, marker in LOCATOR_PLAN]
+        assert [marker_of(agent.browser, loc)["marker"] for loc in locators] == [m for _step, m in LOCATOR_PLAN]
         assert {f["rule"] for f in found} == {"role_name_scope"}
+        assert all(f["verified"] and (f["unique"] or f["count_match"]) for f in found)
         # And, when the name no longer matches, through the next rule down.
         field, save, generated = locators[2], locators[3], locators[4]
         renamed = {"name": "something else"}
         assert agent.browser.resolve({**save, **renamed})["rule"] == "test_id"
         assert agent.browser.resolve({**field, **renamed})["rule"] == "id"
         assert agent.browser.resolve({**generated, **renamed}) == {
-            "rule": "css_path", "tag": "button", "marker": "generated", "text": "Generated",
+            "rule": "css_path", "unique": None, "count_match": None, "verified": True, "tag": "button",
+            "text": "Generated",
         }
+        assert marker_of(agent.browser, {**generated, **renamed})["marker"] == "generated"
         assert agent.browser.resolve({"role": "button", "name": "Nope", "ordinal": {"document": 0}}) is None
     finally:
         agent.close()
@@ -188,6 +200,48 @@ def test_locators_find_the_same_element_again(open_page, fixture_base_url, monke
     for path in run.rglob("*"):
         if path.is_file() and path.suffix != ".jpg":
             assert "zzz" not in without_images(path), path.name
+
+
+# variant -> (markers that must still resolve to themselves, markers that must be refused: no element at all).
+DRIFT = {
+    "identical": (None, []),
+    "rowabove": (["beta-open", "save", "email", "dialog-delete"], ["same1-open", "same2-open"]),
+    "hide": (["dialog-delete", "panel1-delete", "save"], ["row1-remove", "row2-remove", "row3-remove"]),
+    "icons": (["save", "pay", "dialog-delete"], ["icon1", "icon2", "icon3"]),
+    "pay": (["save", "edit", "dialog-delete"], ["pay"]),
+    "testid": (["pay", "save", "dialog-delete"], ["edit"]),
+    "idwrap": (["pay", "save", "dialog-delete"], ["submit"]),
+}
+
+
+def test_a_drifted_page_never_resolves_to_another_element(open_page, fixture_base_url):
+    """The replay contract: on a changed page a locator finds the SAME element (data-m marker) or nothing."""
+    browser = open_page("locators.html")
+    recorded = browser.evaluate(
+        "(() => { const {locator, shown}=" + A11Y + "; return Object.fromEntries("
+        "[...document.querySelectorAll('[data-m]')].filter(e => shown(e)).map(e => [e.dataset.m, locator(e)])"
+        ".filter(pair => pair[1])); })()"
+    )
+    assert {"secret", "icon2", "row2-remove", "pay", "edit", "submit", "twin2"} <= set(recorded)
+    assert recorded["secret"]["role"] is None and recorded["secret"]["type"] == "password"
+    assert "hidden-delete" not in recorded
+    for variant, (kept, refused) in DRIFT.items():
+        browser.navigate({"kind": "goto", "url": f"{fixture_base_url}/locators.html?variant={variant}"})
+        found = {marker: marker_of(browser, loc) for marker, loc in recorded.items()}
+        # Never another element, under any rule.
+        wrong = {m: f for m, f in found.items() if f["marker"] not in (None, m)}
+        assert not wrong, (variant, wrong)
+        if kept is None:  # An identical page: everything is found, by the primary rule.
+            assert {m: f["rule"] for m, f in found.items()} == dict.fromkeys(recorded, "role_name_scope"), variant
+        for marker in kept or []:
+            assert found[marker]["marker"] == marker, (variant, marker)
+        for marker in refused:
+            assert found[marker]["marker"] is None, (variant, marker, found[marker])
+    # The refusal is a named rule, and the caller can tell: several matches, counts no longer as recorded.
+    browser.navigate({"kind": "goto", "url": f"{fixture_base_url}/locators.html?variant=pay"})
+    assert browser.resolve(recorded["pay"]) == {
+        "rule": "ambiguous", "unique": False, "count_match": False, "verified": False, "tag": None, "text": None,
+    }
 
 
 def test_urls_are_redacted_everywhere_the_run_wrote_them(open_page, fixture_base_url, monkeypatch, tmp_path):

@@ -180,20 +180,26 @@ class Browser:
 
     def locator(self, node, full_urls=False):
         """Where the observed element is, described to be found again on a fresh load (see a11y.js locator). A link's
-        href has its query values and fragment replaced by <redacted> unless full_urls."""
+        href has its query values and fragment replaced by <redacted> unless full_urls. None when the node is gone;
+        {"error": "NotInDocument"} for an element in a shadow root or a frame, which could never be found again."""
         return self.evaluate(
             "(() => { const {locator}=" + A11Y + f"; const e=window.__jevFast?.nodes.get({int(node)});"
-            f" return e ? locator(e, {'true' if full_urls else 'false'}) : null; }})()"
+            f" if (!e) return null; const l=locator(e, {'true' if full_urls else 'false'});"
+            " return l ?? {error:'NotInDocument'}; })()"
         )
 
     def resolve(self, locator):
-        """The element a recorded locator points at on the page as it is now: {"rule", "tag", "marker", "text"} (marker
-        is its data-m attribute, for tests), or None. rule is role_name_scope, test_id, id or css_path (a11y.js)."""
-        return self.evaluate(
+        """The element a recorded locator points at on the page as it is now, or None when nothing matches:
+        {"rule", "unique", "count_match", "verified", "tag", "text"}. rule is role_name_scope, test_id, id or css_path
+        (a11y.js); "ambiguous" (tag and text None) means several controls matched and the recorded counts no longer
+        hold, so no element is returned. An element is returned only if its tag, type, role and text still match."""
+        found = self.evaluate(
             "(() => { const {resolve}=" + A11Y + f"; const r=resolve({json.dumps(locator)});"
-            " return r.element ? {rule:r.rule, tag:r.element.tagName.toLowerCase(),"
-            " marker:r.element.getAttribute('data-m'), text:(r.element.innerText||'').slice(0,80)} : null; })()"
+            " return {rule:r.rule, unique:r.unique, count_match:r.count_match, verified:r.verified,"
+            " tag:r.element ? r.element.tagName.toLowerCase() : null,"
+            " text:r.element ? (r.element.innerText||'').slice(0,80) : null}; })()"
         )
+        return found if found["rule"] else None
 
     def observe(self, screenshot=True):
         if getattr(self, "after_input", None):

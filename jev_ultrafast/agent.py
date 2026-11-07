@@ -458,6 +458,8 @@ class Agent:
             found = self.browser.locator(action["node"], full_urls=self.evidence_urls == "full")
         except Exception as error:
             return None, type(error).__name__
+        if found and found.get("error"):
+            return None, found["error"]
         return (self.clean(found), None) if found else (None, "ElementGone")
 
     def raw_page(self):

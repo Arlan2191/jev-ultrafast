@@ -32,9 +32,55 @@
   <a href="/verify?token=zzz#frag-zzz" data-m="verify" onclick="return false">Verify account</a>
   <button id="twin" data-m="twin1">Twin</button>
   <button id="twin" data-m="twin2">Twin</button>
+  <!-- Drift fixtures: ?variant= changes the page after load (see test_a_drifted_page_never_resolves_to_another_element). -->
+  <section aria-label="Rows">
+    <button data-m="row1-remove">Remove</button>
+    <button data-m="row2-remove">Remove</button>
+    <button data-m="row3-remove">Remove</button>
+  </section>
+  <div id="tools">
+    <button data-m="icon1" style="width:20px;height:20px"><svg width="8" height="8"></svg></button>
+    <button data-m="icon2" style="width:20px;height:20px"><svg width="8" height="8"></svg></button>
+    <button data-m="icon3" style="width:20px;height:20px"><svg width="8" height="8"></svg></button>
+  </div>
+  <button data-m="pay">Pay</button>
+  <button data-testid="edit-button" data-m="edit">Edit</button>
+  <button id="submit-order" data-m="submit">Submit order</button>
+  <input type="password" aria-label="Passphrase" data-m="secret">
   <p id="status">idle</p>
 </main>
 <script>
+  {
+    const variant = new URLSearchParams(location.search).get('variant');
+    const at = marker => document.querySelector('[data-m="' + marker + '"]');
+    const make = html => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
+    // A row with the same name is inserted above the "Same" rows.
+    if (variant === 'rowabove') at('same1-open').closest('li').before(
+      make('<li><span>Same</span> <a href="/same/0" data-m="same0-open" onclick="return false">Open</a></li>'));
+    // The first of three equally named controls is hidden (a collapsed menu).
+    if (variant === 'hide') at('row1-remove').hidden = true;
+    // Another unnamed icon button is added first.
+    if (variant === 'icons') at('icon1').before(
+      make('<button data-m="icon-new" style="width:20px;height:20px"><svg width="8" height="8"></svg></button>'));
+    // A look-alike "Pay" comes first.
+    if (variant === 'pay') at('pay').before(make('<button data-m="ad-pay">Pay</button>'));
+    // The test id moves to another control and the original is renamed.
+    if (variant === 'testid') {
+      const edit = at('edit');
+      edit.removeAttribute('data-testid');
+      edit.textContent = 'Rename';
+      edit.after(make('<button data-testid="edit-button" data-m="delete-account">Delete account</button>'));
+    }
+    // The id moves to a wrapper div and the button is renamed.
+    if (variant === 'idwrap') {
+      const button = at('submit'), wrapper = document.createElement('div');
+      wrapper.id = 'submit-order';
+      button.removeAttribute('id');
+      button.textContent = 'Place order';
+      button.before(wrapper);
+      wrapper.append(button);
+    }
+  }
   document.addEventListener('click', event => {
     document.getElementById('status').textContent = 'clicked ' + (event.target.textContent || '').trim();
   });
