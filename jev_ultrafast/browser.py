@@ -55,19 +55,29 @@ class ReadTimeout(StalePage, TimeoutError):
 
 class MutationTimeout(RuntimeError):
     """A CDP call that changes the page (input, navigation, key) got no answer in time. It may or may not have been
-    applied, so it is never retried and the run ends with this error."""
+    applied, so it is never retried. `method` is the CDP method that timed out. Browser raises it; the Agent ends the
+    run as "failed" with stop_reason "mutation_timeout: <method>"."""
+
+    def __init__(self, message, method=None):
+        super().__init__(message)
+        self.method = method
 
 
-# CDP methods that change the page. Everything else the library sends is a read.
+# CDP methods that change the page. Everything else the library sends is a read. Classified by method, not by
+# params: mouseMoved and mouseWheel are kept as mutations although a move or a scroll is harmless to repeat, because
+# a hover handler is a policy-gated action here and the whole Input.dispatchMouseEvent family is then never retried.
+# Target.createTarget is one too: a timeout may have opened a tab we hold no id for, so it is not retried (the tab may
+# be orphaned; Browser cannot close what it never got an id for).
 MUTATING = {
     "Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText", "Page.navigate", "Page.reload",
-    "Page.navigateToHistoryEntry",
+    "Page.navigateToHistoryEntry", "Target.createTarget",
 }
 NAVIGATING = {"Page.navigate", "Page.reload", "Page.navigateToHistoryEntry"}
 DEFAULT_CDP_TIMEOUT_MS = 15000
+MAX_READ_TIMEOUTS = 2  # Consecutive ReadTimeouts one observe() tolerates.
 
 
-def send(method, session, timeout_s, mutation=None, **params):
+def cdp_call(method, session, timeout_s, mutation=None, **params):
     """The one way the library sends a CDP call: with a response timeout of its own (browser-harness defaults to 5 s).
     A timeout raises MutationTimeout for a call that changes the page, ReadTimeout for a read. `mutation` overrides
     the method's own class (an evaluate that sets a value is a mutation)."""
@@ -78,7 +88,8 @@ def send(method, session, timeout_s, mutation=None, **params):
         if mutating:
             raise MutationTimeout(
                 f"{method} timed out after {timeout_s:g}s waiting for the daemon; it may have been applied, so it "
-                "was not retried"
+                "was not retried",
+                method,
             ) from error
         raise ReadTimeout(f"{method} timed out after {timeout_s:g}s waiting for the daemon") from error
 
@@ -218,7 +229,7 @@ class Browser:
         timeout_s = params.pop("_response_timeout", None)
         if timeout_s is None:
             timeout_s = (self.navigation_timeout_ms if method in NAVIGATING else self.cdp_timeout_ms) / 1000
-        return send(method, self.session if session is False else session, timeout_s, **params)
+        return cdp_call(method, self.session if session is False else session, timeout_s, **params)
 
     def evaluate(self, expression):
         response = self.call("Runtime.evaluate", expression=expression, returnByValue=True)
@@ -306,6 +317,7 @@ class Browser:
                 self.settle_after_action(activity)
             finally:
                 self.action_mark = None
+        timeouts = 0
         for attempt in range(10):
             try:
                 return browser_operation(
@@ -318,8 +330,10 @@ class Browser:
                         "cdp_timeout_ms": self.cdp_timeout_ms,
                     }
                 )
-            except StalePage:
-                if attempt == 9:
+            except StalePage as error:
+                # A page whose reads time out would cost 15 s a try: give up on the second one in a row.
+                timeouts = timeouts + 1 if isinstance(error, ReadTimeout) else 0
+                if attempt == 9 or timeouts >= MAX_READ_TIMEOUTS:
                     raise
                 time.sleep(0.02)
         raise StalePage("Page did not settle")
@@ -605,8 +619,8 @@ class Browser:
 
     def close(self):
         if self.target:
-            self.call("Target.closeTarget", session=None, targetId=self.target)
-            self.target = None
+            target, self.target = self.target, None
+            self.call("Target.closeTarget", session=None, targetId=target)
 
 
 def fingerprint(state):
@@ -629,7 +643,7 @@ def browser_operation(request):
     selecting = operation == "act" and request["action"]["kind"] == "select"
 
     def call(method, mutation=None, **params):
-        return send(method, session, params.pop("_response_timeout", timeout_s), mutation=mutation, **params)
+        return cdp_call(method, session, params.pop("_response_timeout", timeout_s), mutation=mutation, **params)
 
     def evaluate(expression, await_promise=False, wait_s=0):
         extra = {"awaitPromise": True} if await_promise else {}

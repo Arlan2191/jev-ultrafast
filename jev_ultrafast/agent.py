@@ -1,6 +1,7 @@
 """The complete agent loop. Typed choices, observable state, bounded execution."""
 
 import base64
+import contextlib
 import copy
 import functools
 import re
@@ -8,7 +9,15 @@ import time
 from pathlib import Path
 
 from . import replay as recorded
-from .browser import Browser, Refused, StalePage, content_fingerprint, fingerprint
+from .browser import (
+    Browser,
+    MutationTimeout,
+    ReadTimeout,
+    Refused,
+    StalePage,
+    content_fingerprint,
+    fingerprint,
+)
 from .evidence import DROPPED_PART, MODES, URL_MODES, Evidence, library_version, redact_url
 from .keys import validate_keys, validate_urls
 from .model import action_space, choose, field_context, field_text
@@ -116,13 +125,18 @@ class Agent:
     tracker shows nothing pending (default 150; None always keeps the full 500 ms, which also catches rollbacks the
     tracker cannot see: WebSocket, SSE, postMessage, setInterval, ignore_urls endpoints). A model run ignores it.
     replay_routes: replay only: a list of regular expressions for URL paths that are compared by pattern, not by text
-    (e.g. r"^/orders/[^/]+$"); a path any of them matches is the same page whatever its id. Id-like path segments (a
-    UUID, a hex run of 8 or more with a digit, digits, a 16+ character token with letters and digits) are always
-    compared by shape. A goto URL is still compared exactly.
+    (e.g. r"^/orders/[^/]+$"); a path any of them matches IN FULL (re.fullmatch) is the same page whatever its id.
+    replay_id_segments: replay only (default True): id-like path segments (a UUID, a hex run of 8 or more with a
+    digit, digits, a 16+ character token with letters and digits) are compared by shape, so /x/<id>/delete on another
+    id is the same page: a destructive step then needs an expect check that names the resource or a before_action
+    veto. False compares paths exactly (a declared replay_routes pattern still applies). A goto URL is always compared
+    exactly.
     cdp_timeout_ms: how long one CDP call waits for the browser (default 15000; browser-harness alone waits 5 s). A
     read that times out is treated like a stale page (observe again); a call that changes the page (input, key,
-    navigation) that times out is never retried and ends the run with an error naming the call. Page.navigate and
-    the document wait use navigation_timeout_ms.
+    navigation) that times out is never retried: the action is recorded as unconfirmed (history executed "unknown", a
+    mutation_timeout trace event naming the CDP method) and the run ends "failed" with stop_reason
+    "mutation_timeout: <method>". Two read timeouts in a row in one observe end the run "failed" with stop_reason
+    "read_timeout". Page.navigate and the document wait use navigation_timeout_ms.
     goals: a string, or a list of strings and Step(goal, expect=(), values=None). Each item is one step; the model
     sees only the current step's goal, the goals already completed and the current step's check descriptions.
     Checks (jev_ultrafast.expect) are evaluated in code. A DONE choice on a step with checks is accepted only when
@@ -204,6 +218,7 @@ class Agent:
         heal=True,
         replay_quiet_ms=150,
         replay_routes=None,
+        replay_id_segments=True,
         cdp_timeout_ms=15000,
     ):
         self.viewport = viewport = viewport_size(viewport)
@@ -223,7 +238,13 @@ class Agent:
         positive_int("replay_quiet_ms", replay_quiet_ms, optional=True, minimum=0)
         self.replay_quiet_ms = replay_quiet_ms
         replay_routes = recorded.route_patterns(replay_routes)
-        self.replay = recorded.Replay(replay, steps, values, heal, replay_routes) if replay is not None else None
+        if type(replay_id_segments) is not bool:
+            raise ValueError("replay_id_segments must be True or False")
+        self.replay = (
+            recorded.Replay(replay, steps, values, heal, replay_routes, replay_id_segments)
+            if replay is not None
+            else None
+        )
         secrets = {
             form: name
             for source in (values, *(s.values for s in steps))
@@ -507,7 +528,7 @@ class Agent:
         if type(action.get("node")) is not int:
             return None, "NoNode"
         try:
-            found = self.browser.locator(action["node"], full_urls=self.evidence_urls == "full")
+            found = self.read_locator(action["node"])
         except Exception as error:
             return None, type(error).__name__
         if found and found.get("error"):
@@ -521,10 +542,19 @@ class Agent:
         if not self.locators or type(node) is not int:
             return None
         try:
-            found = self.browser.locator(node, full_urls=self.evidence_urls == "full")
+            found = self.read_locator(node)
         except Exception:
             return None
         return self.clean(found) if found and not found.get("error") else None
+
+    def read_locator(self, node):
+        """The locator read of one node, once more when the page did not answer in time (a recorded step without a
+        locator can never be replayed, so one slow read is not given up on at once)."""
+        full = self.evidence_urls == "full"
+        try:
+            return self.browser.locator(node, full_urls=full)
+        except ReadTimeout:
+            return self.browser.locator(node, full_urls=full)
 
     def raw_page(self):
         raw = self._raw
@@ -720,6 +750,15 @@ class Agent:
         return result
 
     def command(self, name, body=None):
+        if name != "tick":
+            return self.run_command(name, body)
+        try:
+            return self.run_command(name, body)
+        except ReadTimeout:
+            # The page would not answer even to the look-again of a stale tick: end the run, never raise.
+            return self.stop("failed", "read_timeout")
+
+    def run_command(self, name, body=None):
         body = body or {}
         state = self.state
         if name == "tick":
@@ -885,6 +924,7 @@ class Agent:
             locator, locator_error = self.locate(action)
             focus_locator = self.locate_focus(page) if shown["kind"] == "key" else None
             # Browser.act checks freshness immediately before input, including after text generation.
+            unconfirmed = None
             try:
                 outcome = state["browser"].act(action, raw, text=text)
             except Refused as refusal:
@@ -892,6 +932,9 @@ class Agent:
                 if self.refuse(shown, page, selected, str(refusal), refusal.pointer_moved):
                     return self.stop("blocked", "refused")
                 raise
+            except MutationTimeout as timeout:
+                # It may have been applied. Record it as unconfirmed below and end the run: it is never sent again.
+                outcome, unconfirmed = None, timeout
             self.pending_text = None
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             # Record execution before observing. A stale post-action observation must not erase the action.
@@ -921,6 +964,7 @@ class Agent:
                     **({"waited_ms": waited["waited_ms"], "met": waited["met"]} if waited else {}),
                     **({"locator": locator} if self.locators else {}),
                     **({"locator_error": locator_error} if locator_error else {}),
+                    **({"executed": "unknown"} if unconfirmed else {}),
                 }
             )
             if self.evidence:
@@ -947,7 +991,14 @@ class Agent:
                     page_url=redact_url(page["url"]),
                     url=shown.get("url"),
                     result=outcome if isinstance(outcome, dict) else None,
+                    **({"executed": "unknown"} if unconfirmed else {}),
                 )
+            if unconfirmed:
+                self.trace(
+                    "mutation_timeout", index=len(state["history"]), method=unconfirmed.method, label=shown["label"],
+                    kind=shown["kind"], error=str(unconfirmed),
+                )
+                return self.stop("failed", f"mutation_timeout: {unconfirmed.method}")
             state["page"] = self.observe(after_action=True)
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             state["history"][-1].update(
@@ -1011,10 +1062,14 @@ class Agent:
         if planned.kind in recorded.ELEMENT:
             if not planned.locator:
                 return None, "locator_missing"
-            if cause := recorded.page_cause(planned, self.state["page"]["url"], self.replay.routes):
+            if cause := recorded.page_cause(
+                planned, self.state["page"]["url"], self.replay.routes, self.replay.id_segments
+            ):
                 return None, cause
             try:
                 found = self.browser.resolve(planned.locator, node=True)
+            except ReadTimeout:
+                raise  # The page did not answer: a stale page (observe again), not a divergence.
             except Exception:
                 return None, "resolve_failed"
             cause = recorded.unresolved(found)
@@ -1022,7 +1077,8 @@ class Agent:
         else:
             page_ = self.state["page"]
             action, cause = recorded.control_action(
-                planned, actions, page_.get("focus"), self.focus_node(planned), page_["url"], self.replay.routes
+                planned, actions, page_.get("focus"), self.focus_node(planned), page_["url"], self.replay.routes,
+                self.replay.id_segments,
             )
         if cause:
             return None, cause
@@ -1044,6 +1100,8 @@ class Agent:
             return None
         try:
             found = self.browser.resolve(planned.focus_locator, node=True)
+        except ReadTimeout:
+            raise
         except Exception:
             return None
         return None if recorded.unresolved(found) else found["node"]
@@ -1169,5 +1227,9 @@ class Agent:
     def __enter__(self):
         return self
 
-    def __exit__(self, *_args):
-        self.close()
+    def __exit__(self, exc_type, *_args):
+        if exc_type is None:
+            self.close()
+        else:
+            with contextlib.suppress(Exception):
+                self.close()  # A teardown error must not hide the exception that is already leaving the block.

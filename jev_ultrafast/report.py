@@ -91,6 +91,9 @@ def event_card(event, run_dir, budget):
         return f'<div class="card warn">{label}: {esc(event["label"])} - {esc(event["reason"])} {stamp}</div>'
     if kind == "denied":
         return f'<div class="card bad">Denied by policy: {esc(event["action"])} - {esc(event["reason"])} {stamp}</div>'
+    if kind == "mutation_timeout":
+        text = f"No answer to {esc(event['method'])} for {esc(event['label'])}; it may have been applied"
+        return f'<div class="card bad">{text} {stamp}</div>'
     if kind == "done_rejected":
         failed = "; ".join(f"{esc(f['description'])} ({esc(f['reason'])})" for f in event["failed"])
         return f'<div class="card warn">DONE rejected: {failed} {stamp}</div>'
