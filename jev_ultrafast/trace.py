@@ -24,6 +24,7 @@ EVENTS = {
     "refused": ("label", "kind", "reason", "skipped"),
     "denied": ("reason", "action", "kind"),
     "done_rejected": ("failed",),
+    "heal": ("step", "cause", "healed", "model_calls"),
     "run_end": ("status", "stop_reason", "verified", "totals", "screenshot"),
 }
 
