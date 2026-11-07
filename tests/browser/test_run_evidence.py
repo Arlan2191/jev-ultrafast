@@ -150,14 +150,16 @@ def test_locators_find_the_same_element_again(open_page, fixture_base_url, monke
         agent.browser.navigate({"kind": "reload"})
         found = [agent.browser.resolve(loc) for loc in locators]
         assert [marker_of(agent.browser, loc)["marker"] for loc in locators] == [m for _step, m in LOCATOR_PLAN]
-        assert {f["rule"] for f in found} == {"role_name_scope"}
+        # A unique test id (Save) is read first; every other control is found by role, name and scope.
+        assert {f["rule"] for f in found} == {"role_name_scope", "test_id_first"}
+        assert found[3]["rule"] == "test_id_first" and found[0]["rule"] == "role_name_scope"
         assert all(f["verified"] and f["count_match"] for f in found)
         # And, when the name no longer matches, through the next rule down.
         field, save, generated = locators[2], locators[3], locators[4]
         renamed = {"name": "something else"}
         # Without the position data the primary rule is skipped and the fallbacks, which check the name, find them.
         unplaced = {"ordinal": None}
-        assert agent.browser.resolve({**save, **unplaced})["rule"] == "test_id"
+        assert agent.browser.resolve({**save, **unplaced})["rule"] == "test_id_first"
         assert agent.browser.resolve({**field, **unplaced})["rule"] == "id"
         # A renamed control is never returned by a fallback; css_path is only a hint, never an element.
         for loc in (save, field):
@@ -255,8 +257,12 @@ def test_a_drifted_page_never_resolves_to_another_element(open_page, fixture_bas
         # Never another element, under any rule.
         wrong = {m: f for m, f in found.items() if f["marker"] not in (None, m)}
         assert not wrong, (variant, wrong)
-        if kept is None:  # An identical page: everything is found, by the primary rule.
-            assert {m: f["rule"] for m, f in found.items()} == dict.fromkeys(recorded, "role_name_scope"), variant
+        if kept is None:  # An identical page: all found, a unique test id first, the rest by the primary rule.
+            by_test_id = {m for m, loc in recorded.items() if loc["test_id"] and loc["test_id_unique"]}
+            assert by_test_id == {"save", "edit", "o", "t2s"}
+            assert {m: f["rule"] for m, f in found.items()} == {
+                m: "test_id_first" if m in by_test_id else "role_name_scope" for m in recorded
+            }, variant
         for marker in kept or []:
             assert found[marker]["marker"] == marker, (variant, marker)
         for marker in refused:
@@ -269,7 +275,7 @@ def test_a_drifted_page_never_resolves_to_another_element(open_page, fixture_bas
     }
     # T2 is the case the fallback is for: the scope was renamed, the test id is unique and the scope count was 1.
     browser.navigate({"kind": "goto", "url": f"{fixture_base_url}/locators.html?variant=T2"})
-    assert browser.resolve(recorded["t2s"])["rule"] == "test_id"
+    assert browser.resolve(recorded["t2s"])["rule"] == "test_id_first"
     # The contents of an editable element are not returned, as they are not recorded.
     browser.navigate({"kind": "goto", "url": f"{fixture_base_url}/locators.html"})
     assert recorded["note"]["text"] == ""

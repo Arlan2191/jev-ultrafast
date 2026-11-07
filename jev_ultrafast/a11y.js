@@ -219,12 +219,21 @@
   // (and, with a scope, the recorded scope count) equals the current one and, when position alone decides, the digest of
   // the look-alikes' container (see digestOf) equals the recorded one; otherwise it refuses with rule "ambiguous"
   // (digest_changed: true when the digest was the reason).
-  // Then test_id and a unique stable id, each accepted only if `verifies`, unique then and now, and not under a
-  // scope that had siblings of its kind (its count was 1 or there was no scope). css_path is never a resolution: it comes
-  // back as {element:null, rule:'hint', hint:{tag,text}} for the caller to show or ignore.
+  // A test id unique then and now and `verifies` is read before all of that (rule test_id_first). Then a unique stable
+  // id, accepted only if `verifies`, unique then and now, and not under a scope that had siblings of
+  // its kind (its count was 1 or there was no scope). css_path is never a resolution: it comes back as
+  // {element:null, rule:'hint', hint:{tag,text}} for the caller to show or ignore.
   const resolve = loc => {
     const none = (rule=null) => ({element:null, rule, unique:false, count_match:false, verified:false});
     if (!loc || !loc.tag) return none();
+    // A test id is an identity the page author placed. Unique when recorded and unique now, on an element that still
+    // has the recorded tag, type, role, name and text (and link target), and not under a scope that had siblings of its
+    // kind: then it is the same element, whatever the look-alikes' container shows now. Anything else falls through.
+    if (loc.test_id && loc.test_id_unique===true && (!loc.scope || loc.scope.count===1)) {
+      const hits = withTestId(loc.test_id);
+      if (hits.length===1 && verifies(hits[0], loc))
+        return {element:hits[0], rule:'test_id_first', unique:true, count_match:null, verified:true};
+    }
     if (loc.name !== undefined && loc.ordinal) {
       let root = document, ordinal = loc.ordinal.document, recorded = loc.ordinal.document_count;
       if (loc.scope) {
@@ -249,17 +258,11 @@
         if (verifies(element, loc)) return {element, rule:'role_name_scope', unique, count_match, verified:true};
       }
     }
-    // A fallback can only be trusted to be the same element when it is unique now and was unique when recorded,
-    // and the recorded scope (if any) was the only one of its kind: otherwise a sibling scope's control with the
-    // same test id or id would pass `verifies`.
+    // The stable id is a fallback only: it can only be trusted to be the same element when it is unique now and was
+    // unique when recorded, and the recorded scope (if any) was the only one of its kind.
     const fallbackOk = !loc.scope || loc.scope.count===1;
     const fallback = (element, rule, recordedUnique) => fallbackOk && recordedUnique===true && verifies(element, loc) ?
       {element, rule, unique:true, count_match:null, verified:true} : null;
-    if (loc.test_id) {
-      const hits = withTestId(loc.test_id);
-      const hit = hits.length===1 ? fallback(hits[0], 'test_id', loc.test_id_unique) : null;
-      if (hit) return hit;
-    }
     if (loc.id && anchorId(loc.id)) {
       const hit = withId(loc.id)===1 ? fallback(document.getElementById(loc.id), 'id', loc.id_unique) : null;
       if (hit) return hit;
