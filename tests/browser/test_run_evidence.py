@@ -275,7 +275,8 @@ def test_a_drifted_page_never_resolves_to_another_element(open_page, fixture_bas
     }
     # T2: the scope was renamed, so the test id is outside the recorded scope and is not trusted: a refusal.
     browser.navigate({"kind": "goto", "url": f"{fixture_base_url}/locators.html?variant=T2"})
-    assert browser.resolve(recorded["t2s"])["rule"] != "test_id_first"
+    t2 = browser.resolve(recorded["t2s"])
+    assert t2["rule"] == "hint" and t2["verified"] is False and t2["tag"] is None and t2["text"] is None
     # The contents of an editable element are not returned, as they are not recorded.
     browser.navigate({"kind": "goto", "url": f"{fixture_base_url}/locators.html"})
     assert recorded["note"]["text"] == ""

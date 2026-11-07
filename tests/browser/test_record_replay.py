@@ -701,6 +701,25 @@ def test_a_positional_test_id_never_clicks_the_other_named_row(lab):
     assert lab.clicked(again) == ["alice"] and chooser.calls == []
 
 
+def test_known_residual_a_test_id_moved_onto_a_look_alike_while_the_container_text_changed(lab):
+    chooser = testid_chooser()
+    agent, state, _model, _wall = lab.run(url="replay_testid.html?variant=live", goals=TESTID_GOALS, chooser=chooser)
+    assert state["status"] == "done" and lab.clicked(agent) == ["main"]
+    agent.close()
+    chooser.forbid = True
+    # Known residual (README): the digest differs, so the primary rule refuses and the moved test id stands. Pinned so a
+    # change in either direction is visible; if this starts healing, update the README residual too.
+    again, replayed, _model, _wall = lab.run(
+        url="replay_testid.html?variant=residual",
+        goals=TESTID_GOALS,
+        chooser=chooser,
+        replay=lab.trace(agent),
+        heal=False,
+    )
+    assert replayed["status"] == "done", replayed["stop_reason"]
+    assert lab.clicked(again) == ["beta"] and chooser.calls == []
+
+
 def test_a_test_id_moved_onto_a_same_name_look_alike_is_a_refusal_that_heals(lab):
     chooser = testid_chooser()
     agent, state, _model, _wall = lab.run(url="replay_testid.html", goals=TESTID_GOALS, chooser=chooser)
