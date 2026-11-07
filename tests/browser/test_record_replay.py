@@ -625,3 +625,58 @@ def test_a_declared_route_pattern_lets_a_replay_run_on_another_path(lab):
         replay_routes=[r"^/items/[^/]+/replay_id\.html$"],
     )
     assert replayed["status"] == "done" and sources(replayed) == ["replay"]
+
+
+TESTID_GOALS = [Step("Add the first one", expect=expect.text("Added main"))]
+
+
+MAIN = "window.__jevFast.ids.get(document.querySelector('[data-m=main]'))"
+
+
+def testid_chooser():
+    return pick_chooser(
+        lambda page, c: next(a["id"] for a in page["actions"] if a.get("node") == c.agent.browser.evaluate(MAIN))
+    )
+
+
+def test_a_unique_test_id_resolves_when_the_look_alikes_container_text_changed(lab):
+    chooser = testid_chooser()
+    agent, state, _model, _wall = lab.run(url="replay_testid.html?variant=live", goals=TESTID_GOALS, chooser=chooser)
+    assert state["status"] == "done" and lab.clicked(agent) == ["main"]
+    locator = next(e for e in load_trace(lab.trace(agent)) if e["type"] == "action")["locator"]
+    assert locator["test_id"] == "add-main" and locator["test_id_unique"] is True
+    agent.close()
+    chooser.forbid = True  # Another price on this load: the digest differs, the test id still names the control.
+    again, replayed, _model, _wall = lab.run(
+        url="replay_testid.html?variant=live", goals=TESTID_GOALS, chooser=chooser, replay=lab.trace(agent), heal=False
+    )
+    assert replayed["status"] == "done", replayed["stop_reason"]
+    assert set(sources(replayed)) == {"replay"} and chooser.calls == [] and lab.clicked(again) == ["main"]
+
+
+def test_a_test_id_moved_to_another_control_is_not_resolved_and_the_step_heals(lab):
+    chooser = testid_chooser()
+    agent, state, _model, _wall = lab.run(url="replay_testid.html?variant=live", goals=TESTID_GOALS, chooser=chooser)
+    assert state["status"] == "done"
+    agent.close()
+    again, healed, _model, _wall = lab.run(
+        url="replay_testid.html?variant=moved", goals=TESTID_GOALS, chooser=chooser, replay=lab.trace(agent)
+    )
+    assert healed["status"] == "done" and lab.clicked(again) == ["main"]  # Never the Remove button that has the id now.
+    again.close()
+    heal = next(e for e in load_trace(lab.trace(again)) if e["type"] == "heal")
+    assert heal["cause"] == "digest_changed"
+
+
+def test_a_test_id_that_is_duplicated_at_replay_is_not_resolved_by_it(lab):
+    chooser = testid_chooser()
+    agent, state, _model, _wall = lab.run(url="replay_testid.html?variant=live", goals=TESTID_GOALS, chooser=chooser)
+    assert state["status"] == "done"
+    agent.close()
+    again, healed, _model, _wall = lab.run(
+        url="replay_testid.html?variant=dup", goals=TESTID_GOALS, chooser=chooser, replay=lab.trace(agent)
+    )
+    assert healed["status"] == "done" and lab.clicked(again) == ["main"]
+    again.close()
+    heal = next(e for e in load_trace(lab.trace(again)) if e["type"] == "heal")
+    assert heal["cause"] == "digest_changed"
