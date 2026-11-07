@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Test id in a repeated scope</title></head>
+<body>
+<!-- Responsive duplicate layout: two "Shell" main landmarks, each with a same-named Search box; only the first carries a
+     unique test id. Each landmark also holds live data (a different total on every load).
+     ?variant=three: a third "Shell" landmark is added. ?variant=moved: the test id moves into the second landmark. -->
+<div id="host"></div>
+<p id="out"></p>
+<script>
+  const variant = new URLSearchParams(location.search).get("variant");
+  window.__typed = [];
+  const count = variant === "three" ? 3 : 2;
+  const tidIn = variant === "moved" ? 2 : 1;
+  const total = "Total " + Math.random();
+  for (let i = 1; i <= count; i++) {
+    const main = document.createElement("main");
+    main.setAttribute("aria-label", "Shell");
+    main.innerHTML = `<p>${total}</p><input type="text" aria-label="Search" data-m="s${i}">`;
+    const input = main.querySelector("input");
+    if (i === tidIn) input.setAttribute("data-testid", "search");
+    input.addEventListener("input", () => {
+      window.__typed.push("s" + i);
+      document.getElementById("out").textContent = "Typed s" + i;
+    });
+    document.getElementById("host").appendChild(main);
+  }
+</script>
+</body>
+</html>
