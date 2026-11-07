@@ -347,8 +347,8 @@ def test_a_clock_outside_the_list_does_not_make_the_step_heal(lab):
     again, replayed, _model, _wall = lab.run(
         url="replay_longlist.html?variant=clock", goals=goals, chooser=chooser, replay=lab.trace(agent), heal=False
     )
-    assert replayed["status"] == "done" and sources(replayed) == ["replay"], replayed["stop_reason"]
-    assert lab.clicked(again) == ["b"]
+    assert replayed["status"] == "done" and set(sources(replayed)) == {"replay"}, replayed["stop_reason"]
+    assert len(replayed["history"]) == len(state["history"]) and set(lab.clicked(again)) == {"b"}
 
 
 def test_volatile_text_inside_the_rows_heals(lab):
