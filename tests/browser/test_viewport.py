@@ -20,9 +20,9 @@ def test_a_wide_viewport_shows_the_sidebar_link(open_page):
 
 
 def test_the_wheel_scrolls_at_a_small_viewport(open_page):
-    browser = open_page("viewport.html", viewport=(800, 600))
+    browser = open_page("viewport.html", viewport=(800, 400))
     page = browser.observe(screenshot=False)
-    assert (page["w"], page["h"]) == (800, 600) and page["scroll"]["y"] == 0
+    assert (page["w"], page["h"]) == (800, 400) and page["scroll"]["y"] == 0
     down = next(a for a in page["actions"] if a["id"] == "scroll_down")
     browser.act(down, page)
     # The wheel event is applied by the compositor a moment after dispatch.
