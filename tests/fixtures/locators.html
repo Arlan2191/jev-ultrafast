@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Locators</title></head>
+<body>
+<main>
+  <!-- Hidden duplicates come first: a locator that counted them would shift every ordinal below. -->
+  <div hidden><button data-m="hidden-delete">Delete</button></div>
+  <section aria-label="Panel" hidden><button data-m="hidden-panel-delete">Delete</button></section>
+  <h1>Locators</h1>
+  <button data-m="outside-delete">Delete</button>
+  <dialog open aria-label="Confirm delete">
+    <p>Remove this item?</p>
+    <button data-m="dialog-delete">Delete</button>
+    <button>Cancel</button>
+  </dialog>
+  <ul>
+    <li><span>Alpha</span> <a href="/items/1?tab=info" onclick="return false">Open</a></li>
+    <li><span>Beta</span> <a href="/items/2?tab=info" data-m="beta-open" onclick="return false">Open</a></li>
+  </ul>
+  <form aria-label="Contact">
+    <label for="email">Email address</label>
+    <input id="email" data-m="email" type="text" placeholder="you@example.test">
+  </form>
+  <button data-testid="save-button" data-m="save">Save</button>
+  <button id=":r1:" data-m="generated">Generated</button>
+  <section aria-label="Panel"><button data-m="panel1-delete">Delete</button></section>
+  <section aria-label="Panel"><button data-m="panel2-delete">Delete</button></section>
+  <ul>
+    <li><span>Same</span> <a href="/same/1" data-m="same1-open" onclick="return false">Open</a></li>
+    <li><span>Same</span> <a href="/same/2" data-m="same2-open" onclick="return false">Open</a></li>
+  </ul>
+  <a href="/verify?token=zzz#frag-zzz" data-m="verify" onclick="return false">Verify account</a>
+  <button id="twin" data-m="twin1">Twin</button>
+  <button id="twin" data-m="twin2">Twin</button>
+  <!-- Drift fixtures: ?variant= changes the page after load (see test_a_drifted_page_never_resolves_to_another_element). -->
+  <section aria-label="Rows">
+    <button data-m="row1-remove">Remove</button>
+    <button data-m="row2-remove">Remove</button>
+    <button data-m="row3-remove">Remove</button>
+  </section>
+  <div id="tools">
+    <button data-m="icon1" style="width:20px;height:20px"><svg width="8" height="8"></svg></button>
+    <button data-m="icon2" style="width:20px;height:20px"><svg width="8" height="8"></svg></button>
+    <button data-m="icon3" style="width:20px;height:20px"><svg width="8" height="8"></svg></button>
+  </div>
+  <button data-m="pay">Pay</button>
+  <button data-testid="edit-button" data-m="edit">Edit</button>
+  <button id="submit-order" data-m="submit">Submit order</button>
+  <input type="password" aria-label="Passphrase" data-m="secret">
+  <!-- Reviewer probes (round 3), each changed by its own ?variant= letter. -->
+  <ul id="pa">
+    <li><span>Order</span> <button data-m="a1">Remove order</button></li>
+    <li><span>Order</span> <button data-m="a2">Remove order</button></li>
+    <li><span>Order</span> <button data-m="a3">Remove order</button></li>
+  </ul>
+  <div id="pe">
+    <button data-m="e1">Go</button>
+    <button data-m="e2">Go</button>
+    <button data-m="e3">Go</button>
+  </div>
+  <div id="pg">
+    <section aria-label="Card"><button data-m="g1">Buy</button></section>
+    <section aria-label="Card"><button data-m="g2">Buy</button></section>
+    <section aria-label="Card"><button data-m="g3">Buy</button></section>
+  </div>
+  <section aria-label="Pair"><button data-m="h1">Buy</button><button data-m="h2">Buy</button></section>
+  <button data-testid="go-btn" aria-label="Settle" data-m="o">Go</button>
+  <button id="save-draft" data-m="p">Save draft</button>
+  <div id="pm">
+    <button aria-label="A" data-m="ma">X</button>
+    <button aria-label="B" data-m="mb">X</button>
+  </div>
+  <div id="pq">
+    <input type="checkbox" aria-label="Agree" data-m="q1">
+    <input type="checkbox" aria-label="Newsletter" data-m="q2">
+  </div>
+  <!-- Reviewer probes (round 4): a fallback (test id, id) must not leave its recorded scope. -->
+  <div id="pt">
+    <section aria-label="Plan A"><button data-testid="choose-t" data-m="t1">Choose</button></section>
+    <section aria-label="Plan B"><button data-testid="choose-t" data-m="t2">Choose</button></section>
+  </div>
+  <section aria-label="Solo old"><button data-testid="pick-t2" data-m="t2s">Pick</button></section>
+  <ul id="pt3">
+    <li><span>Ann</span> <button data-testid="del-t3" data-m="t3a">Discard</button></li>
+    <li><span>Bob</span> <button data-testid="del-t3" data-m="t3b">Discard</button></li>
+  </ul>
+  <div id="pu">
+    <section aria-label="Deal"><button id="take-now" data-m="ua">Take</button></section>
+    <section aria-label="Deal"><button data-m="ub">Take</button></section>
+  </div>
+  <div id="pr">
+    <div contenteditable="true" role="textbox" aria-label="Note" data-m="note">secret-value-123</div>
+  </div>
+  <p id="status">idle</p>
+</main>
+<script>
+  {
+    const variant = new URLSearchParams(location.search).get('variant');
+    const at = marker => document.querySelector('[data-m="' + marker + '"]');
+    const make = html => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
+    // A row with the same name is inserted above the "Same" rows.
+    if (variant === 'rowabove') at('same1-open').closest('li').before(
+      make('<li><span>Same</span> <a href="/same/0" data-m="same0-open" onclick="return false">Open</a></li>'));
+    // The first of three equally named controls is hidden (a collapsed menu).
+    if (variant === 'hide') at('row1-remove').hidden = true;
+    // Another unnamed icon button is added first.
+    if (variant === 'icons') at('icon1').before(
+      make('<button data-m="icon-new" style="width:20px;height:20px"><svg width="8" height="8"></svg></button>'));
+    // A look-alike "Pay" comes first.
+    if (variant === 'pay') at('pay').before(make('<button data-m="ad-pay">Pay</button>'));
+    // The test id moves to another control and the original is renamed.
+    if (variant === 'testid') {
+      const edit = at('edit');
+      edit.removeAttribute('data-testid');
+      edit.textContent = 'Rename';
+      edit.after(make('<button data-testid="edit-button" data-m="delete-account">Delete account</button>'));
+    }
+    // The id moves to a wrapper div and the button is renamed.
+    if (variant === 'idwrap') {
+      const button = at('submit'), wrapper = document.createElement('div');
+      wrapper.id = 'submit-order';
+      button.removeAttribute('id');
+      button.textContent = 'Place order';
+      button.before(wrapper);
+      wrapper.append(button);
+    }
+    const drop = (...markers) => markers.forEach(m => (at(m).closest('li, section') ?? at(m)).remove());
+    // A: two of three equal rows go, and the one left is not the target (the first).
+    if (variant === 'A') drop('a1', 'a2');
+    // E: no scope, two of three equal buttons go.
+    if (variant === 'E') drop('e1', 'e2');
+    // G: two of three equal scopes go, the survivor holds a Buy button.
+    if (variant === 'G') drop('g1', 'g2');
+    // H: one scope with two Buy buttons keeps only the second.
+    if (variant === 'H') drop('h1');
+    // O: the same test id and text, another accessible name.
+    if (variant === 'O') at('o').setAttribute('aria-label', 'Refund');
+    // P: the stable id moves to another control with the same tag and a different name; the original is renamed.
+    if (variant === 'P') {
+      const p = at('p');
+      p.textContent = 'Keep';
+      p.removeAttribute('id');
+      p.after(make('<button id="save-draft" data-m="p-other">Discard</button>'));
+    }
+    // M: a new button first, and the target is renamed (the same position now holds another control).
+    if (variant === 'M') {
+      at('mb').setAttribute('aria-label', 'B2');
+      at('ma').before(make('<button aria-label="N" data-m="mnew">X</button>'));
+    }
+    // N: the first button goes and the second shifts into its position.
+    if (variant === 'N') at('ma').remove();
+    // Q: a checkbox (no text) is renamed in place.
+    if (variant === 'Q') at('q1').setAttribute('aria-label', 'Consent');
+    // T: Plan A goes; Plan B's button has the same (shared) test id.
+    if (variant === 'T') drop('t1');
+    // T2: the only scope is renamed; the button, its test id (unique) and its name are unchanged.
+    if (variant === 'T2') document.querySelector('[aria-label="Solo old"]').setAttribute('aria-label', 'Solo new');
+    // T3: Ann's row goes; Bob's Delete has the same (shared) test id.
+    if (variant === 'T3') drop('t3a');
+    // U: the first of two Deal scopes goes and its stable id moves to Deal B's button.
+    if (variant === 'U') {
+      drop('ua');
+      at('ub').id = 'take-now';
+    }
+  }
+  document.addEventListener('click', event => {
+    document.getElementById('status').textContent = 'clicked ' + (event.target.textContent || '').trim();
+  });
+</script>
+</body>
+</html>

@@ -16,6 +16,7 @@ Read README.md before editing. Keep the loop small: page -> indexed elements -> 
 - Verify actual final outcomes independently. A DONE choice is not proof of success.
 - Checks (`Step(expect=...)`, `jev_ultrafast.expect`) are evaluated in code, never by the model; DONE on a step with checks is accepted only when they hold twice, across a settle, and an action whose checks hold (twice) completes the step without a DONE call. A check callable is read-only, idempotent and fast, and runs after every action only with `auto=True`.
 - The model picks a declared value by name; it sees the text only where the page or the history shows it, and never for a secret (`values=`). A secret value is redacted (also its encoded forms) from history, state, hook text, check reasons and the page the model reads, including the first observation, and only the browser receives the real text.
+- Run evidence (`Agent(evidence_dir=...)`, `trace.py`, `evidence.py`, `report.py`) is off by default and read-only: console and network come from a websocket of its own (never browser-harness's shared event buffer, never wrapped page functions), every file but the screenshots passes through the secret scrub, and `Agent.close()` must leave no thread running. The element locator lives in `a11y.js` so a replay can reuse it.
 - Keep examples, README claims, raw evidence, and model-call counts consistent.
 - Do not commit or push unless the user requests it.
 

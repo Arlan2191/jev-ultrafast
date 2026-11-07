@@ -39,7 +39,7 @@ class Facade:
     def __init__(self, browser):
         self._browser = browser
 
-    def unwrap(self):
+    def _unwrap(self):
         return self._browser
 
     def evaluate(self, expression):

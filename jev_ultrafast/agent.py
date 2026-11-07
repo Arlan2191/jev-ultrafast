@@ -8,13 +8,16 @@ import time
 from pathlib import Path
 
 from .browser import Browser, Refused, StalePage, content_fingerprint, fingerprint
+from .evidence import DROPPED_PART, MODES, URL_MODES, Evidence, library_version
 from .keys import validate_keys, validate_urls
 from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS, NONE
 from .steps import parse_goals, redaction, secret_forms, validate_values
+from .trace import SCHEMA
 from .waits import MAX_WAITS, attribute_names, ignore_patterns
 
 TERMINAL = {"done", "blocked", "denied", "budget", "failed"}
+LOCATED = {"click", "fill", "select", "hover"}  # Action kinds that target an element, so get a locator.
 # Dropped from the copy of a page that the model and the state see when a secret value is declared: the marker and the
 # element guards hold raw field values, and only the browser needs them (it keeps the raw page).
 RAW_ONLY = {"marker", "guards"}
@@ -43,6 +46,10 @@ def scrub(value, secrets):
     if isinstance(value, list | tuple):
         return [scrub(v, secrets) for v in value]
     return value
+
+
+def history_entry_failed(unmet):
+    return [{"description": d, "reason": r} for d, r in unmet]
 
 
 class ActionDenied(Exception):
@@ -106,6 +113,18 @@ class Agent:
     Step's own values override). The model chooses a value by name only and never sees its text; secret values are
     redacted as "<secret:name>" in history, state and the page the model reads, and before_action receives that marker
     as text, with the name as action["value_name"].
+    evidence_dir: a new or empty directory; the run writes trace.jsonl (every event the agent saw, decided and did,
+    with a replay-grade locator for each executed element: see jev_ultrafast.trace), screenshots/NNNN.jpg,
+    console.jsonl, network.jsonl, network.har (no bodies) and report.html there. Everything but the screenshots
+    passes through the secret scrub; screenshots are images of the page and are not redacted. screenshots: with
+    evidence_dir, "actions" (default: the first page, the page after every executed action, and the last), "all"
+    (also every other observation), "failure" (only the last page, when the run does not end done) or "none";
+    without it, True keeps its old meaning (every observation carries a screenshot). locators: add the locator to
+    every history entry (on by default with evidence_dir). Console and network need BU_CDP_URL or BU_CDP_WS (they
+    are marked unavailable in run_start otherwise). evidence_urls: "redacted" (default) writes every URL (network,
+    console, observe, locator href, report) as origin + path with each query value and the fragment replaced by
+    <redacted>; "full" keeps them, for private use only. evidence_capture: False runs without the second websocket
+    (no console or network files; trace, screenshots and locators remain), for CDP endpoints that allow one client.
     new_window: None (default) gives the owned tab a window of its own only in headless Chrome, where a background
     tab is throttled to about one frame per second after its first clicks; True or False force it. Headed Chrome
     has not been tested, and a new window there is a visible one.
@@ -113,6 +132,7 @@ class Agent:
 
     # What an Agent built without __init__ (a test double) means: one unchecked step, no values.
     steps, values, secrets, _raw = (), {}, (), None
+    evidence, locators, evidence_urls = None, False, "redacted"
     expect_timeout_ms, max_rejections, auto_complete = 5000, 3, True
 
     def __init__(
@@ -121,7 +141,11 @@ class Agent:
         goals,
         *,
         record_dir=None,
-        screenshots=False,
+        screenshots=None,
+        evidence_dir=None,
+        locators=None,
+        evidence_urls="redacted",
+        evidence_capture=True,
         max_steps=MAX_STEPS,
         max_model_calls=None,
         settle_ms=50,
@@ -198,29 +222,75 @@ class Agent:
         self.auto_complete = auto_complete
         self.secrets = secrets
         self.pending_text = None
-        self.browser = Browser(
-            url,
-            settle_ms=settle_ms,
-            autocomplete_settle_ms=autocomplete_settle_ms,
-            reveal_timeout_ms=reveal_timeout_ms,
-            keys=keys,
-            urls=urls,
-            navigation_timeout_ms=navigation_timeout_ms,
-            wait_quiet_ms=wait_quiet_ms,
-            wait_timeout_ms=wait_timeout_ms,
-            action_settle_timeout_ms=action_settle_timeout_ms,
-            new_window=new_window,
-            ignore_urls=ignore_urls,
-            wait_timer_ms=wait_timer_ms,
-            body_cap_ms=body_cap_ms,
-            wait_ignore_attributes=wait_ignore_attributes,
-            wait_interactive_grace_ms=wait_interactive_grace_ms,
+        if isinstance(screenshots, str):
+            if screenshots not in MODES or not evidence_dir:
+                raise ValueError(f"screenshots={screenshots!r} needs evidence_dir and one of {', '.join(MODES)}")
+            mode = screenshots
+        elif screenshots is None or type(screenshots) is bool:
+            mode = {None: "actions", True: "all", False: "none"}[screenshots]
+        else:
+            raise ValueError("screenshots must be True, False, None or one of " + ", ".join(MODES))
+        if locators is not None and type(locators) is not bool:
+            raise ValueError("locators must be True, False or None")
+        self.locators = bool(evidence_dir) if locators is None else locators
+        if evidence_urls not in URL_MODES:
+            raise ValueError(f"evidence_urls must be one of {', '.join(URL_MODES)}")
+        if type(evidence_capture) is not bool:
+            raise ValueError("evidence_capture must be True or False")
+        self.evidence_urls = evidence_urls
+        self.evidence = (
+            Evidence(evidence_dir, mode, clean=self.clean, urls=evidence_urls, capture=evidence_capture)
+            if evidence_dir
+            else None
         )
+        screenshots = screenshots is True
+        try:
+            self.browser = Browser(
+                url,
+                settle_ms=settle_ms,
+                autocomplete_settle_ms=autocomplete_settle_ms,
+                reveal_timeout_ms=reveal_timeout_ms,
+                keys=keys,
+                urls=urls,
+                navigation_timeout_ms=navigation_timeout_ms,
+                wait_quiet_ms=wait_quiet_ms,
+                wait_timeout_ms=wait_timeout_ms,
+                action_settle_timeout_ms=action_settle_timeout_ms,
+                new_window=new_window,
+                ignore_urls=ignore_urls,
+                wait_timer_ms=wait_timer_ms,
+                body_cap_ms=body_cap_ms,
+                wait_ignore_attributes=wait_ignore_attributes,
+                wait_interactive_grace_ms=wait_interactive_grace_ms,
+                **({"on_target": self.evidence.attach} if self.evidence else {}),
+            )
+        except Exception:
+            if self.evidence:
+                self.evidence.close()
+            raise
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
+        self.config = dict(
+            max_steps=max_steps, max_model_calls=self.max_model_calls, settle_ms=settle_ms,
+            autocomplete_settle_ms=autocomplete_settle_ms, reveal_timeout_ms=reveal_timeout_ms,
+            stuck_after=stuck_after, keys=list(keys), urls=dict(urls), navigation_timeout_ms=navigation_timeout_ms,
+            wait_quiet_ms=wait_quiet_ms, wait_timeout_ms=wait_timeout_ms,
+            action_settle_timeout_ms=action_settle_timeout_ms, new_window=new_window,
+            ignore_urls=[getattr(u, "pattern", u) for u in ignore_urls], wait_timer_ms=wait_timer_ms,
+            body_cap_ms=body_cap_ms, wait_ignore_attributes=list(wait_ignore_attributes),
+            wait_interactive_grace_ms=wait_interactive_grace_ms, expect_timeout_ms=expect_timeout_ms,
+            max_rejections=max_rejections, auto_complete=auto_complete, require_expectations=require_expectations,
+            before_action=before_action is not None, locators=self.locators, evidence_urls=evidence_urls,
+            evidence_capture=evidence_capture,
+            screenshots=self.evidence.mode if self.evidence else None,
+        )
         try:
+            self.trace_start(url)
             page = self.shown(self.browser.observe(screenshot=self.screenshots))
+            self.trace_observe(page, important=True)
         except Exception:
+            if self.evidence:
+                self.evidence.close()
             self.browser.close()
             raise
         self.state = dict(
@@ -263,9 +333,12 @@ class Agent:
         if self.record_dir:
             self.record_dir.mkdir(parents=True, exist_ok=True)
             (self.record_dir / "000000.jpg").write_bytes(base64.b64decode(page["screenshot"]))
+        self.trace("step", index=0, status="active")
 
     def snapshot(self):
         self.sync_step()
+        if self.evidence and self.state["status"] in TERMINAL:
+            self.end_evidence()
         return {
             **{k: v for k, v in self.state.items() if k != "browser"},
             "elements": action_space(self.state["page"]["actions"])[0],
@@ -288,8 +361,106 @@ class Agent:
         self._raw = (shown, raw)
         return shown
 
-    def observe(self):
-        return self.shown(self.state["browser"].observe(screenshot=self.screenshots))
+    def observe(self, after_action=False):
+        page = self.shown(self.state["browser"].observe(screenshot=self.screenshots))
+        self.trace_observe(page, important=after_action)
+        return page
+
+    # Evidence (see jev_ultrafast.evidence). Every method here is a no-op without evidence_dir.
+
+    def trace(self, event_type, /, **fields):
+        if self.evidence and not self.evidence.ended:
+            self.evidence.event(event_type, **fields)
+
+    def trace_start(self, url):
+        if not self.evidence:
+            return
+        version = getattr(self.browser, "version", None)
+        version = version if isinstance(version, dict) else {}
+        names = {name: v.secret for name, v in self.values.items()}
+        self.evidence.event(
+            "run_start",
+            trace_schema=SCHEMA,
+            library_version=library_version(),
+            url=url,
+            browser={"product": version.get("product"), "user_agent": version.get("userAgent")},
+            viewport={"width": 1120, "height": 780},
+            steps=[
+                {"goal": step.goal, "checks": [e.description for e in step.expect], "values": {
+                    name: v.secret for name, v in step.values.items()}}
+                for step in self.steps
+            ],
+            values=names,
+            config=self.config,
+            capture=self.evidence.capture,
+        )
+
+    def trace_observe(self, page, important=False):
+        if not self.evidence:
+            return
+        focus = page.get("focus") or {}
+        self.trace(
+            "observe",
+            url=page["url"],
+            title=page.get("title"),
+            fingerprint=page["fingerprint"],
+            elements=len(page["actions"]),
+            focus={k: focus.get(k) for k in ("role", "label", "tag", "type", "href")} if focus else None,
+            screenshot=self.evidence.observed(self.browser, page, important),
+        )
+
+    def end_evidence(self):
+        """Write run_end once, with the final screenshot and totals that match the state."""
+        evidence, state = self.evidence, self.state
+        if not evidence or evidence.ended:
+            return
+        usage = {"jev": {}, "text": {}}
+        for kind, rows in (("jev", state["decisions"]), ("text", state["text_calls"])):
+            for row in rows:
+                for key, count in (row.get("usage") or {}).items():
+                    if isinstance(count, int | float) and not isinstance(count, bool):
+                        usage[kind][key] = usage[kind].get(key, 0) + count
+        done = sum(r["status"] == "done" for r in state.get("steps", []))
+        missing = sum(
+            1 for h in state["history"] if self.locators and h["kind"] in LOCATED and h.get("locator") is None
+        )
+        evidence.event(
+            "run_end",
+            status=state["status"],
+            stop_reason=state["stop_reason"] or ("closed" if state["status"] not in TERMINAL else None),
+            verified=state["verified"],
+            totals={
+                "steps": len(state.get("steps", [])),
+                "steps_done": done,
+                "actions": self.executed(),
+                "jev_calls": len(state["decisions"]),
+                "text_calls": len(state["text_calls"]),
+                "tokens": usage,
+                "wall_ms": state["elapsed_ms"],
+                "locator_missing": missing,
+            },
+            dropped=evidence.dropped(),
+            dropped_part=DROPPED_PART,
+            capture_lost=evidence.lost(),
+            screenshot=evidence.final(self.browser, state["status"]),
+        )
+        evidence.ended = True
+        evidence.write_streams()
+
+    def locate(self, action):
+        """(locator, error) for the element an action targets, read in the page just before it runs. The error is
+        None, or why a replayable action has no locator (the trace says so instead of recording a bare null)."""
+        if not self.locators or action["kind"] not in LOCATED:
+            return None, None
+        if type(action.get("node")) is not int:
+            return None, "NoNode"
+        try:
+            found = self.browser.locator(action["node"], full_urls=self.evidence_urls == "full")
+        except Exception as error:
+            return None, type(error).__name__
+        if found and found.get("error"):
+            return None, found["error"]
+        return (self.clean(found), None) if found else (None, "ElementGone")
 
     def raw_page(self):
         raw = self._raw
@@ -329,6 +500,7 @@ class Agent:
 
     def activate(self, record):
         record.update(status="active", started_ms=self.now_ms() if self.state.get("started_at") else None)
+        self.trace("step", index=self.state["steps"].index(record), status="active")
         marks = self.__dict__.setdefault("_marks", {})
         marks[self.state["steps"].index(record)] = (self.model_calls(), self.executed())
 
@@ -337,6 +509,7 @@ class Agent:
         if record and record["status"] == "active":
             self.sync_step()
             record.update(status=status, ended_ms=self.now_ms(), verified=verified)
+            self.trace("step", index=self.state["steps"].index(record), status=status, verified=verified)
 
     def finish_run(self):
         state = self.state
@@ -373,6 +546,10 @@ class Agent:
             reason = self.clean(result.reason)
             waited = result.waited_ms + ((entry["waited_ms"] or 0) if again else 0)
             entry.update(met=result.met, reason=reason, waited_ms=waited)
+            self.trace(
+                "check", step=self.state["plan_index"], description=entry["description"], met=result.met,
+                reason=reason, waited_ms=waited,
+            )
             if not result.met:
                 unmet.append((self.clean(expectation.description), reason))
                 stopped = once and not everything
@@ -405,6 +582,7 @@ class Agent:
                 "elapsed_ms": self.now_ms(),
             }
         )
+        self.trace("done_rejected", step=self.state["plan_index"], failed=history_entry_failed(unmet))
         if record["rejections"] >= self.max_rejections:
             self.end_step("failed")
             self.stop("failed", "expectations")
@@ -445,6 +623,9 @@ class Agent:
         waits = self.state.setdefault("waits", [])
         entry = {"kind": kind, **result.as_dict()}
         waits.append({**entry, "reason": self.clean(entry.get("reason"))} if "reason" in entry else entry)
+        self.trace(
+            "wait", kind=kind, met=entry.get("met"), waited_ms=entry.get("waited_ms"), reason=entry.get("reason")
+        )
         del waits[:-MAX_WAITS]
         return result
 
@@ -508,6 +689,22 @@ class Agent:
                 }
             )
             state["status"] = "predicted"
+            if self.evidence:
+                decided = state["decision"]
+                labels = {a["id"]: a["label"] for a in page["actions"]}
+                ranked = sorted(decided["probabilities"].items(), key=lambda item: -item[1])[:5]
+                self.trace(
+                    "decision",
+                    operation=decided["operation"],
+                    target=decided["target"],
+                    choice=decided["choice"],
+                    value=decided.get("value"),
+                    top=[{"id": i, "label": labels.get(i), "p": round(p, 4)} for i, p in ranked],
+                    confidence=decided["confidence"],
+                    latency_ms=decided["latency_ms"],
+                    usage=decided["usage"],
+                    model=decided.get("model"),
+                )
         elif name == "act":
             decision, page = state["decision"], state["page"]
             if not decision or body.get("fingerprint") != page["fingerprint"]:
@@ -549,7 +746,7 @@ class Agent:
                     raise StalePage("Page changed before text generation. Choose again.")
                 if decision.get("value") == NONE:
                     # No declared value fits and there is no text helper: type nothing, and leave this field out of
-                    # the next choice (a refusal, so it also counts toward stuck_after).
+                    # the next choice (a skip: it does not count toward stuck_after).
                     return self.skip_field(shown, page, selected)
                 declared = self.current_values().get(decision.get("value"))
                 if declared:
@@ -580,8 +777,10 @@ class Agent:
                         "kind": shown["kind"],
                         "choice": selected,
                     }
+                    self.trace("denied", **state["denied"])
                     self.end_step("blocked")
                     return self.stop("denied")
+            locator, locator_error = self.locate(action)
             # Browser.act checks freshness immediately before input, including after text generation.
             try:
                 outcome = state["browser"].act(action, raw, text=text)
@@ -616,9 +815,28 @@ class Agent:
                     "executed_ms": round((time.perf_counter() - state["started_at"]) * 1000),
                     "elapsed_ms": state["elapsed_ms"],
                     **({"waited_ms": waited["waited_ms"], "met": waited["met"]} if waited else {}),
+                    **({"locator": locator} if self.locators else {}),
+                    **({"locator_error": locator_error} if locator_error else {}),
                 }
             )
-            state["page"] = self.observe()
+            if self.evidence:
+                self.trace(
+                    "action",
+                    index=len(state["history"]),
+                    kind=shown["kind"],
+                    label=shown["label"],
+                    choice=selected,
+                    operation=decision["operation"],
+                    locator=locator,
+                    locator_error=locator_error,
+                    text_source=source,
+                    text=recorded,
+                    value_name=value_name,
+                    key=shown.get("key"),
+                    url=shown.get("url"),
+                    result=outcome if isinstance(outcome, dict) else None,
+                )
+            state["page"] = self.observe(after_action=True)
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             state["history"][-1].update(
                 page_changed=state["page"]["fingerprint"] != page["fingerprint"],
@@ -662,9 +880,10 @@ class Agent:
             raise ValueError("Unknown command")
         return self.snapshot()
 
-    def refuse(self, shown, page, selected, reason, pointer_moved=False):
+    def refuse(self, shown, page, selected, reason, pointer_moved=False, skipped=False):
         """Record an action that was not executed and tell the model about it. True when stuck_after refusals in a row
-        (with nothing executed between) say the run should stop."""
+        (with nothing executed between) say the run should stop. A skipped field (NONE) is hidden like a refusal but
+        does not count: it cannot repeat on the same page and max_model_calls bounds the loop."""
         state = self.state
         refused = state.setdefault("refused", [])
         del refused[:-49]
@@ -678,13 +897,17 @@ class Agent:
                 "choice": selected,
                 "after": len(state["history"]),
                 "pointer_moved": pointer_moved,
+                "skipped": skipped,
             }
         )
-        return sum(r["after"] == len(state["history"]) for r in refused) >= self.stuck_after
+        self.trace(
+            "refused", label=shown["label"], kind=shown["kind"], reason=reason, skipped=skipped,
+            pointer_moved=pointer_moved,
+        )
+        return sum(r["after"] == len(state["history"]) and not r["skipped"] for r in refused) >= self.stuck_after
 
     def skip_field(self, shown, page, selected):
-        if self.refuse(shown, page, selected, "no declared value fits this field; nothing typed"):
-            return self.stop("blocked", "refused")
+        self.refuse(shown, page, selected, "no declared value fits this field; nothing typed", skipped=True)
         self.state["status"] = "ready"
         self.state["elapsed_ms"] = self.now_ms()
         return self.snapshot()
@@ -706,7 +929,14 @@ class Agent:
             yield self.command("tick")
 
     def close(self):
-        self.browser.close()
+        try:
+            if self.evidence:
+                try:
+                    self.end_evidence()
+                finally:
+                    self.evidence.close()
+        finally:
+            self.browser.close()
 
     def __enter__(self):
         return self

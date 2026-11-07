@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Evidence</title></head>
+<body>
+<h1>Evidence</h1>
+<button id="run">Run</button>
+<p id="status">idle</p>
+<script>
+  console.log('page loaded', 42);
+  console.log('visiting', location.href);
+  // Chrome reports a response as finished only once its body is read.
+  const read = response => response.text();
+  fetch('/api/0').then(read).catch(() => {});
+  fetch('/api/1?token=zzz').then(read).catch(() => {});
+  document.getElementById('run').addEventListener('click', () => {
+    console.log('hello', {a: 1});
+    console.warn('careful now');
+    console.error('something broke');
+    setTimeout(() => { throw new Error('uncaught boom'); }, 0);
+    fetch('/api/5').then(read).then(() => fetch('/missing-resource')).then(read).catch(() => {});
+    fetch('http://127.0.0.1:1/unreachable').catch(() => {});
+    document.getElementById('status').textContent = 'ran';
+  });
+</script>
+</body>
+</html>
