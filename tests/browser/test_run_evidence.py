@@ -151,17 +151,22 @@ def test_locators_find_the_same_element_again(open_page, fixture_base_url, monke
         found = [agent.browser.resolve(loc) for loc in locators]
         assert [marker_of(agent.browser, loc)["marker"] for loc in locators] == [m for _step, m in LOCATOR_PLAN]
         assert {f["rule"] for f in found} == {"role_name_scope"}
-        assert all(f["verified"] and (f["unique"] or f["count_match"]) for f in found)
+        assert all(f["verified"] and f["count_match"] for f in found)
         # And, when the name no longer matches, through the next rule down.
         field, save, generated = locators[2], locators[3], locators[4]
         renamed = {"name": "something else"}
-        assert agent.browser.resolve({**save, **renamed})["rule"] == "test_id"
-        assert agent.browser.resolve({**field, **renamed})["rule"] == "id"
+        # Without the position data the primary rule is skipped and the fallbacks, which check the name, find them.
+        unplaced = {"ordinal": None}
+        assert agent.browser.resolve({**save, **unplaced})["rule"] == "test_id"
+        assert agent.browser.resolve({**field, **unplaced})["rule"] == "id"
+        # A renamed control is never returned by a fallback; css_path is only a hint, never an element.
+        for loc in (save, field):
+            assert agent.browser.resolve({**loc, **renamed})["rule"] == "hint"
         assert agent.browser.resolve({**generated, **renamed}) == {
-            "rule": "css_path", "unique": None, "count_match": None, "verified": True, "tag": "button",
-            "text": "Generated",
+            "rule": "hint", "unique": False, "count_match": False, "verified": False, "tag": None, "text": None,
+            "hint": {"tag": "button", "text": "Generated"},
         }
-        assert marker_of(agent.browser, {**generated, **renamed})["marker"] == "generated"
+        assert marker_of(agent.browser, {**generated, **renamed})["marker"] is None
         assert agent.browser.resolve({"role": "button", "name": "Nope", "ordinal": {"document": 0}}) is None
     finally:
         agent.close()
@@ -211,6 +216,16 @@ DRIFT = {
     "pay": (["save", "edit", "dialog-delete"], ["pay"]),
     "testid": (["pay", "save", "dialog-delete"], ["edit"]),
     "idwrap": (["pay", "save", "dialog-delete"], ["submit"]),
+    # The reviewer's round 3 probes: counts differ, or a fallback would hit another control; always the same or none.
+    "A": (["save", "dialog-delete"], ["a1", "a2", "a3"]),
+    "E": (["save", "dialog-delete"], ["e1", "e2", "e3"]),
+    "G": (["save", "dialog-delete"], ["g1", "g2", "g3"]),
+    "H": (["save", "dialog-delete"], ["h1", "h2"]),
+    "O": (["save", "dialog-delete"], ["o"]),
+    "P": (["save", "dialog-delete"], ["p"]),
+    "M": (["ma", "save", "dialog-delete"], ["mb"]),
+    "N": (["mb", "save", "dialog-delete"], ["ma"]),
+    "Q": (["q2", "save", "dialog-delete"], ["q1"]),
 }
 
 
@@ -223,6 +238,7 @@ def test_a_drifted_page_never_resolves_to_another_element(open_page, fixture_bas
         ".filter(pair => pair[1])); })()"
     )
     assert {"secret", "icon2", "row2-remove", "pay", "edit", "submit", "twin2"} <= set(recorded)
+    assert {"a1", "e1", "g1", "h1", "o", "p", "ma", "mb", "q1", "q2"} <= set(recorded)
     assert recorded["secret"]["role"] is None and recorded["secret"]["type"] == "password"
     assert "hidden-delete" not in recorded
     for variant, (kept, refused) in DRIFT.items():
@@ -241,6 +257,13 @@ def test_a_drifted_page_never_resolves_to_another_element(open_page, fixture_bas
     browser.navigate({"kind": "goto", "url": f"{fixture_base_url}/locators.html?variant=pay"})
     assert browser.resolve(recorded["pay"]) == {
         "rule": "ambiguous", "unique": False, "count_match": False, "verified": False, "tag": None, "text": None,
+        "hint": None,
+    }
+    # A position is only a hint: M renamed the target, and css_path now points at another button, which is not returned.
+    browser.navigate({"kind": "goto", "url": f"{fixture_base_url}/locators.html?variant=M"})
+    assert browser.resolve(recorded["mb"]) == {
+        "rule": "hint", "unique": False, "count_match": False, "verified": False, "tag": None, "text": None,
+        "hint": {"tag": "button", "text": "X"},
     }
 
 

@@ -190,13 +190,15 @@ class Browser:
 
     def resolve(self, locator):
         """The element a recorded locator points at on the page as it is now, or None when nothing matches:
-        {"rule", "unique", "count_match", "verified", "tag", "text"}. rule is role_name_scope, test_id, id or css_path
-        (a11y.js); "ambiguous" (tag and text None) means several controls matched and the recorded counts no longer
-        hold, so no element is returned. An element is returned only if its tag, type, role and text still match."""
+        {"rule", "unique", "count_match", "verified", "tag", "text", "hint"}. Three outcomes: resolved (rule
+        role_name_scope, test_id or id, verified, tag and text set); "ambiguous" (several controls matched and the
+        recorded counts no longer hold, tag and text None); "hint" (only the recorded css_path still points at
+        something: hint is its {tag, text}, it is not the element, show it or ignore it). An element is returned only
+        if its tag, type, role, name and text still match."""
         found = self.evaluate(
             "(() => { const {resolve}=" + A11Y + f"; const r=resolve({json.dumps(locator)});"
             " return {rule:r.rule, unique:r.unique, count_match:r.count_match, verified:r.verified,"
-            " tag:r.element ? r.element.tagName.toLowerCase() : null,"
+            " hint:r.hint ?? null, tag:r.element ? r.element.tagName.toLowerCase() : null,"
             " text:r.element ? (r.element.innerText||'').slice(0,80) : null}; })()"
         )
         return found if found["rule"] else None

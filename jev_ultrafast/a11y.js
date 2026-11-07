@@ -142,24 +142,25 @@
       rect: {x:Math.round(r.x), y:Math.round(r.y), w:Math.round(r.width), h:Math.round(r.height)},
     };
   };
-  // Does the element still look like the one that was recorded: same tag, same type, same role (when recorded) and,
-  // for anything that has text, the same clipped text.
+  // Does the element still look like the one that was recorded: same tag, same type, same role (when recorded), the
+  // same clipped accessible name and, for anything that has text, the same clipped text.
   const verifies = (e, loc) => !!e && e.tagName.toLowerCase()===loc.tag && (e.type ?? null)===(loc.type ?? null) &&
-    (!loc.role || role(e)===loc.role) && (typeof loc.text!=='string' || textOf(e)===loc.text);
+    (!loc.role || role(e)===loc.role) && (loc.name===undefined || clip(name(e))===loc.name) &&
+    (typeof loc.text!=='string' || textOf(e)===loc.text);
   // The element a recorded locator points at on the page as it is now, or null; never another element.
   // {element, rule, unique, count_match, verified}. The primary rule (role_name_scope) takes the role + name matches
-  // inside the scope (itself found by role + name + ordinal, with its count checked) and accepts one only when it is
-  // the only match, or when the recorded counts (scope and in-scope) still hold; otherwise it refuses with rule
-  // "ambiguous". Then test_id, a unique stable id and css_path, each accepted only if `verifies`.
+  // inside the scope (itself found by role + name + ordinal) and accepts one only when the recorded in-scope count
+  // (and, with a scope, the recorded scope count) equals the current one; otherwise it refuses with rule "ambiguous".
+  // Then test_id and a unique stable id, each accepted only if `verifies`. css_path is never a resolution: it comes
+  // back as {element:null, rule:'hint', hint:{tag,text}} for the caller to show or ignore.
   const resolve = loc => {
     const none = (rule=null) => ({element:null, rule, unique:false, count_match:false, verified:false});
     if (!loc || !loc.tag) return none();
     if (loc.name !== undefined && loc.ordinal) {
-      let root = document, ordinal = loc.ordinal.document, recorded = loc.ordinal.document_count, scopeOk = true;
+      let root = document, ordinal = loc.ordinal.document, recorded = loc.ordinal.document_count;
       if (loc.scope) {
         const like = scopesLike(loc.scope);
         root = like[loc.scope.ordinal ?? 0] ?? null;
-        scopeOk = like.length===1 || like.length===loc.scope.count;
         ordinal = loc.ordinal.scope;
         recorded = loc.ordinal.scope_count;
       }
@@ -168,7 +169,7 @@
       if (found.length) {
         const unique = found.length===1, count_match = sameScopeCount && found.length===recorded;
         const element = found[ordinal];
-        if (!scopeOk || !Number.isInteger(ordinal) || !element || !(unique || count_match)) return none('ambiguous');
+        if (!Number.isInteger(ordinal) || !element || !count_match) return none('ambiguous');
         if (verifies(element, loc)) return {element, rule:'role_name_scope', unique, count_match, verified:true};
       }
     }
@@ -185,7 +186,10 @@
       if (hit) return hit;
     }
     if (loc.css_path) {
-      try { const hit=fallback(document.querySelector(loc.css_path), 'css_path', null); if (hit) return hit; } catch {}
+      try {
+        const e = document.querySelector(loc.css_path);
+        if (e) return {...none('hint'), hint:{tag:e.tagName.toLowerCase(), text:textOf(e)}};
+      } catch {}
     }
     return none();
   };

@@ -47,6 +47,33 @@
   <button data-testid="edit-button" data-m="edit">Edit</button>
   <button id="submit-order" data-m="submit">Submit order</button>
   <input type="password" aria-label="Passphrase" data-m="secret">
+  <!-- Reviewer probes (round 3), each changed by its own ?variant= letter. -->
+  <ul id="pa">
+    <li><span>Order</span> <button data-m="a1">Remove order</button></li>
+    <li><span>Order</span> <button data-m="a2">Remove order</button></li>
+    <li><span>Order</span> <button data-m="a3">Remove order</button></li>
+  </ul>
+  <div id="pe">
+    <button data-m="e1">Go</button>
+    <button data-m="e2">Go</button>
+    <button data-m="e3">Go</button>
+  </div>
+  <div id="pg">
+    <section aria-label="Card"><button data-m="g1">Buy</button></section>
+    <section aria-label="Card"><button data-m="g2">Buy</button></section>
+    <section aria-label="Card"><button data-m="g3">Buy</button></section>
+  </div>
+  <section aria-label="Pair"><button data-m="h1">Buy</button><button data-m="h2">Buy</button></section>
+  <button data-testid="go-btn" aria-label="Settle" data-m="o">Go</button>
+  <button id="save-draft" data-m="p">Save draft</button>
+  <div id="pm">
+    <button aria-label="A" data-m="ma">X</button>
+    <button aria-label="B" data-m="mb">X</button>
+  </div>
+  <div id="pq">
+    <input type="checkbox" aria-label="Agree" data-m="q1">
+    <input type="checkbox" aria-label="Newsletter" data-m="q2">
+  </div>
   <p id="status">idle</p>
 </main>
 <script>
@@ -80,6 +107,33 @@
       button.before(wrapper);
       wrapper.append(button);
     }
+    const drop = (...markers) => markers.forEach(m => (at(m).closest('li, section') ?? at(m)).remove());
+    // A: two of three equal rows go, and the one left is not the target (the first).
+    if (variant === 'A') drop('a1', 'a2');
+    // E: no scope, two of three equal buttons go.
+    if (variant === 'E') drop('e1', 'e2');
+    // G: two of three equal scopes go, the survivor holds a Buy button.
+    if (variant === 'G') drop('g1', 'g2');
+    // H: one scope with two Buy buttons keeps only the second.
+    if (variant === 'H') drop('h1');
+    // O: the same test id and text, another accessible name.
+    if (variant === 'O') at('o').setAttribute('aria-label', 'Refund');
+    // P: the stable id moves to another control with the same tag and a different name; the original is renamed.
+    if (variant === 'P') {
+      const p = at('p');
+      p.textContent = 'Keep';
+      p.removeAttribute('id');
+      p.after(make('<button id="save-draft" data-m="p-other">Discard</button>'));
+    }
+    // M: a new button first, and the target is renamed (the same position now holds another control).
+    if (variant === 'M') {
+      at('mb').setAttribute('aria-label', 'B2');
+      at('ma').before(make('<button aria-label="N" data-m="mnew">X</button>'));
+    }
+    // N: the first button goes and the second shifts into its position.
+    if (variant === 'N') at('ma').remove();
+    // Q: a checkbox (no text) is renamed in place.
+    if (variant === 'Q') at('q1').setAttribute('aria-label', 'Consent');
   }
   document.addEventListener('click', event => {
     document.getElementById('status').textContent = 'clicked ' + (event.target.textContent || '').trim();
