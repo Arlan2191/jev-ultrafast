@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Test id</title></head>
+<body>
+<!-- Three "Add" buttons share a role and a name; only the first carries a unique test id. Their common ancestor is the
+     whole feed, which also holds live data. ?variant=live: a different price on every load. ?variant=moved: live, and
+     the test id moves onto a differently named control. ?variant=dup: live, and a look-alike gets the same test id.
+     ?variant=residual: live, and the test id moves onto a same-text look-alike (a known residual, see README).
+     ?variant=swap: static, and the test id moves from the first Add onto the second (same role, name and text). -->
+<div id="feed">
+  <p id="price"></p>
+  <div><span>Alpha</span> <button type="button" data-testid="add-main" data-m="main" onclick="add('main')">Add</button></div>
+  <div><span>Beta</span> <button type="button" data-m="beta" onclick="add('beta')">Add</button></div>
+  <div><span>Gamma</span> <button type="button" data-m="gamma" onclick="add('gamma')">Add</button></div>
+  <button type="button" data-m="remove" onclick="add('remove')">Remove</button>
+</div>
+<p id="out"></p>
+<script>
+  const variant = new URLSearchParams(location.search).get("variant");
+  window.__clicked = [];
+  const at = m => document.querySelector(`[data-m=${m}]`);
+  if (variant && variant !== "swap") document.getElementById("price").textContent = "Price " + Math.random();
+  if (variant === "moved") {
+    at("main").removeAttribute("data-testid");
+    at("remove").setAttribute("data-testid", "add-main");
+  }
+  if (variant === "swap") {
+    at("main").removeAttribute("data-testid");
+    at("beta").setAttribute("data-testid", "add-main");
+  }
+  if (variant === "residual") {
+    at("main").removeAttribute("data-testid");
+    at("beta").setAttribute("data-testid", "add-main");
+  }
+  if (variant === "dup") at("beta").setAttribute("data-testid", "add-main");
+  function add(id) {
+    window.__clicked.push(id);
+    document.getElementById("out").textContent = "Added " + id;
+  }
+</script>
+</body>
+</html>

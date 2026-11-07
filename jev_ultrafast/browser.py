@@ -253,7 +253,7 @@ class Browser:
     def resolve(self, locator, node=False):
         """The element a recorded locator points at on the page as it is now, or None when nothing matches:
         {"rule", "unique", "count_match", "verified", "tag", "text", "hint"}. Three outcomes: resolved (rule
-        role_name_scope, test_id or id, verified, tag and text set); "ambiguous" (several controls matched and the
+        role_name_scope, test_id_first or id, verified, tag and text set); "ambiguous" (several controls matched and the
         recorded counts no longer hold, tag and text None); "hint" (only the recorded css_path still points at
         something: hint is its {tag, text}, it is not the element, show it or ignore it). An element is returned only
         if its tag, type, role, name and text still match. node=True adds "node": the id the last observation gave

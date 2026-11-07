@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Test ids by position</title></head>
+<body>
+<!-- Two named rows whose "Delete" buttons carry test ids derived from their position (del-1, del-2), unique at record
+     time and at replay time. ?variant=reorder: Bob comes first, so the id del-1 now sits in Bob's row. -->
+<ul id="rows"></ul>
+<p id="out"></p>
+<script>
+  const variant = new URLSearchParams(location.search).get("variant");
+  const names = variant === "reorder" ? ["Bob", "Alice"] : ["Alice", "Bob"];
+  window.__clicked = [];
+  names.forEach((name, index) => {
+    const li = document.createElement("li");
+    li.innerHTML = `<h3>${name}</h3><button type="button" data-testid="del-${index + 1}" data-m="${name.toLowerCase()}">Delete</button>`;
+    li.querySelector("button").onclick = () => {
+      window.__clicked.push(name.toLowerCase());
+      document.getElementById("out").textContent = "Deleted " + name;
+    };
+    document.getElementById("rows").append(li);
+  });
+</script>
+</body>
+</html>

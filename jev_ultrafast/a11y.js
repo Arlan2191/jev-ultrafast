@@ -219,13 +219,17 @@
   // (and, with a scope, the recorded scope count) equals the current one and, when position alone decides, the digest of
   // the look-alikes' container (see digestOf) equals the recorded one; otherwise it refuses with rule "ambiguous"
   // (digest_changed: true when the digest was the reason).
-  // Then test_id and a unique stable id, each accepted only if `verifies`, unique then and now, and not under a
-  // scope that had siblings of its kind (its count was 1 or there was no scope). css_path is never a resolution: it comes
-  // back as {element:null, rule:'hint', hint:{tag,text}} for the caller to show or ignore.
+  // A test id unique then and now and `verifies` is read before all of that (rule test_id_first). Then a unique stable
+  // id, accepted only if `verifies`, unique then and now, and not under a scope that had siblings of
+  // its kind (its count was 1 or there was no scope). css_path is never a resolution: it comes back as
+  // {element:null, rule:'hint', hint:{tag,text}} for the caller to show or ignore.
   const resolve = loc => {
     const none = (rule=null) => ({element:null, rule, unique:false, count_match:false, verified:false});
     if (!loc || !loc.tag) return none();
-    if (loc.name !== undefined && loc.ordinal) {
+    // The primary rule: role + name inside the scope, by ordinal, guarded by counts and digest. Null when it does not
+    // apply or finds nothing that verifies; otherwise a resolved or an "ambiguous" result.
+    const primary = () => {
+      if (loc.name === undefined || !loc.ordinal) return null;
       let root = document, ordinal = loc.ordinal.document, recorded = loc.ordinal.document_count;
       if (loc.scope) {
         const like = scopesLike(loc.scope);
@@ -235,31 +239,43 @@
       }
       const sameScopeCount = !loc.scope || (scopesLike(loc.scope).length===loc.scope.count);
       const found = root ? mine(root, loc.role ?? null, loc.name, loc.tag, loc.type ?? null) : [];
-      if (found.length) {
-        const unique = found.length===1, count_match = sameScopeCount && found.length===recorded;
-        const element = found[ordinal];
-        if (!Number.isInteger(ordinal) || !element || !count_match) return none('ambiguous');
-        // Position alone decides among look-alikes (several matches in the scope, or sibling scopes of the same
-        // name): then what the scope says must be what it said. A locator without a digest (schema 1) cannot tell.
-        if (!unique || (loc.scope && loc.scope.count>1)) {
-          const now = digestOf(found, loc.scope ? root : null);
-          if (typeof loc.digest!=='string' || typeof now!=='string') return none('ambiguous');
-          if (now!==loc.digest) return {...none('ambiguous'), digest_changed:true};
+      if (!found.length) return null;
+      const unique = found.length===1, count_match = sameScopeCount && found.length===recorded;
+      const element = found[ordinal];
+      if (!Number.isInteger(ordinal) || !element || !count_match) return none('ambiguous');
+      // Position alone decides among look-alikes (several matches in the scope, or sibling scopes of the same
+      // name): then what the scope says must be what it said. A locator without a digest (schema 1) cannot tell.
+      if (!unique || (loc.scope && loc.scope.count>1)) {
+        const now = digestOf(found, loc.scope ? root : null);
+        if (typeof loc.digest!=='string' || typeof now!=='string') return none('ambiguous');
+        if (now!==loc.digest) return {...none('ambiguous'), digest_changed:true};
+      }
+      if (verifies(element, loc)) return {element, rule:'role_name_scope', unique, count_match, verified:true};
+      return null;
+    };
+    // A test id is an identity the page author placed. Unique when recorded and unique now, on an element that still
+    // has the recorded tag, type, role, name and text (and link target), not under a scope that had siblings of its
+    // kind, and, with a scope, inside the scope found by role + name + ordinal: then it is the same element, whatever
+    // the look-alikes' container shows now. The primary rule is still consulted: when it resolves a different verified
+    // element the two disagree and the answer is a refusal, never the test id. Anything else falls through.
+    if (loc.test_id && loc.test_id_unique===true && (!loc.scope || loc.scope.count===1)) {
+      const hits = withTestId(loc.test_id);
+      if (hits.length===1 && verifies(hits[0], loc)) {
+        const scopeEl = loc.scope ? (scopesLike(loc.scope)[loc.scope.ordinal ?? 0] ?? null) : null;
+        if (!loc.scope || (scopeEl && scopeEl.contains(hits[0]))) {
+          const first = primary();
+          if (first && first.element && first.element!==hits[0]) return none('ambiguous');
+          return {element:hits[0], rule:'test_id_first', unique:true, count_match:null, verified:true};
         }
-        if (verifies(element, loc)) return {element, rule:'role_name_scope', unique, count_match, verified:true};
       }
     }
-    // A fallback can only be trusted to be the same element when it is unique now and was unique when recorded,
-    // and the recorded scope (if any) was the only one of its kind: otherwise a sibling scope's control with the
-    // same test id or id would pass `verifies`.
+    const main = primary();
+    if (main) return main;
+    // The stable id is a fallback only: it can only be trusted to be the same element when it is unique now and was
+    // unique when recorded, and the recorded scope (if any) was the only one of its kind.
     const fallbackOk = !loc.scope || loc.scope.count===1;
     const fallback = (element, rule, recordedUnique) => fallbackOk && recordedUnique===true && verifies(element, loc) ?
       {element, rule, unique:true, count_match:null, verified:true} : null;
-    if (loc.test_id) {
-      const hits = withTestId(loc.test_id);
-      const hit = hits.length===1 ? fallback(hits[0], 'test_id', loc.test_id_unique) : null;
-      if (hit) return hit;
-    }
     if (loc.id && anchorId(loc.id)) {
       const hit = withId(loc.id)===1 ? fallback(document.getElementById(loc.id), 'id', loc.id_unique) : null;
       if (hit) return hit;

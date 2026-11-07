@@ -308,6 +308,8 @@ def test_resolve_results_map_to_the_matching_action_or_a_cause():
     assert replay.unresolved({"rule": "role_name_scope", "verified": False, "node": 1}) == "unverified"
     assert replay.unresolved({"rule": "role_name_scope", "verified": True, "node": None}) == "not_observed"
     assert replay.unresolved({"rule": "id", "verified": True, "node": 3}) is None
+    assert replay.unresolved({"rule": "test_id_first", "verified": True, "node": 3}) is None
+    assert replay.unresolved({"rule": "test_id_first", "verified": False, "node": 3}) == "unverified"
     actions = [
         {"id": "a", "kind": "click", "node": 5, "label": "A"},
         {"id": "b", "kind": "fill", "node": 6, "label": "B"},
