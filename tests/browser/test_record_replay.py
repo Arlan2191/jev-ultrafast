@@ -680,3 +680,37 @@ def test_a_test_id_that_is_duplicated_at_replay_is_not_resolved_by_it(lab):
     again.close()
     heal = next(e for e in load_trace(lab.trace(again)) if e["type"] == "heal")
     assert heal["cause"] == "digest_changed"
+
+
+def test_a_positional_test_id_never_clicks_the_other_named_row(lab):
+    goals = [Step("Delete Alice", expect=expect.text("Deleted"))]
+    alice = "window.__jevFast.ids.get(document.querySelector('[data-m=alice]'))"
+    chooser = pick_chooser(
+        lambda page, c: next(a["id"] for a in page["actions"] if a.get("node") == c.agent.browser.evaluate(alice))
+    )
+    agent, state, _model, _wall = lab.run(url="replay_testid_rows.html", goals=goals, chooser=chooser)
+    assert state["status"] == "done" and lab.clicked(agent) == ["alice"]
+    locator = next(e for e in load_trace(lab.trace(agent)) if e["type"] == "action")["locator"]
+    assert locator["test_id"] == "del-1" and locator["test_id_unique"] is True and locator["scope"]["name"] == "Alice"
+    agent.close()
+    chooser.forbid = True  # Bob's row carries del-1 now: it is outside Alice's scope, so the primary rule decides.
+    again, replayed, _model, _wall = lab.run(
+        url="replay_testid_rows.html?variant=reorder", goals=goals, chooser=chooser, replay=lab.trace(agent), heal=False
+    )
+    assert replayed["status"] == "done", replayed["stop_reason"]
+    assert lab.clicked(again) == ["alice"] and chooser.calls == []
+
+
+def test_a_test_id_moved_onto_a_same_name_look_alike_is_a_refusal_that_heals(lab):
+    chooser = testid_chooser()
+    agent, state, _model, _wall = lab.run(url="replay_testid.html", goals=TESTID_GOALS, chooser=chooser)
+    assert state["status"] == "done" and lab.clicked(agent) == ["main"]
+    agent.close()
+    # The primary rule still places the first Add (static page, equal digest): the two disagree, so it is a refusal.
+    again, healed, _model, _wall = lab.run(
+        url="replay_testid.html?variant=swap", goals=TESTID_GOALS, chooser=chooser, replay=lab.trace(agent)
+    )
+    assert healed["status"] == "done" and lab.clicked(again) == ["main"]  # Never the second Add.
+    again.close()
+    heal = next(e for e in load_trace(lab.trace(again)) if e["type"] == "heal")
+    assert heal["cause"] == "ambiguous"

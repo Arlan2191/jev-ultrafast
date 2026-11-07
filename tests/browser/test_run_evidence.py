@@ -230,7 +230,7 @@ DRIFT = {
     "Q": (["q2", "save", "dialog-delete"], ["q1"]),
     # Round 4: a fallback never leaves the recorded scope. T, T3, U: the target is gone, a sibling has the same key.
     "T": (["t2", "t2s", "save", "dialog-delete"], ["t1"]),
-    "T2": (["t2s", "save", "dialog-delete"], []),
+    "T2": (["save", "dialog-delete"], ["t2s"]),  # The scope is renamed: the test id is outside the recorded scope.
     "T3": (["t3b", "save", "dialog-delete"], ["t3a"]),
     "U": (["save", "dialog-delete"], ["ua", "ub"]),  # ub: one Deal left of the two recorded, whichever it was
 }
@@ -273,9 +273,9 @@ def test_a_drifted_page_never_resolves_to_another_element(open_page, fixture_bas
         "rule": "ambiguous", "unique": False, "count_match": False, "verified": False, "tag": None, "text": None,
         "hint": None,
     }
-    # T2 is the case the fallback is for: the scope was renamed, the test id is unique and the scope count was 1.
+    # T2: the scope was renamed, so the test id is outside the recorded scope and is not trusted: a refusal.
     browser.navigate({"kind": "goto", "url": f"{fixture_base_url}/locators.html?variant=T2"})
-    assert browser.resolve(recorded["t2s"])["rule"] == "test_id_first"
+    assert browser.resolve(recorded["t2s"])["rule"] != "test_id_first"
     # The contents of an editable element are not returned, as they are not recorded.
     browser.navigate({"kind": "goto", "url": f"{fixture_base_url}/locators.html"})
     assert recorded["note"]["text"] == ""
