@@ -193,17 +193,62 @@ def focus_of(focus):
 
 PAGE_BOUND = {"back", "reload", "scroll", "wait"}  # Same page: scheme, host, path and query keys.
 SAME_ROUTE = ELEMENT | {"key"}  # Mutating kinds: same host and path (the query may vary more, e.g. a page number).
+ID_SEGMENTS = (
+    re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"),  # UUID
+    re.compile(r"(?=.*\d)[0-9a-fA-F]{8,}"),  # Hex run of 8 or more with a digit
+    re.compile(r"\d+"),  # All digits
+    re.compile(r"(?=.*\d)(?=.*[A-Za-z])[A-Za-z0-9_-]{16,}"),  # base64url-ish token with letters and digits
+)
+ID_MARK = "<id>"
+URL_PATH = re.compile(r"((?:[A-Za-z][A-Za-z0-9+.-]*:)?//[^/?#]*)?([^?#]*)(.*)", re.DOTALL)
 
 
-def route(url):
-    """Host and path of a redacted page URL (no query, no fragment), or None when it is not a string."""
-    return re.split(r"[?#]", redact_url(url), maxsplit=1)[0] if isinstance(url, str) else None
+def route_patterns(routes):
+    """The compiled replay_routes: a list of regex strings or compiled patterns, matched anywhere in the URL path."""
+    if routes is None:
+        return ()
+    if isinstance(routes, str | re.Pattern) or not isinstance(routes, list | tuple):
+        raise ValueError("replay_routes must be a list of regular expressions")
+    compiled = []
+    for item in routes:
+        if isinstance(item, str):
+            try:
+                item = re.compile(item)
+            except re.error as error:
+                raise ValueError(f"replay_routes has an invalid pattern {item!r}: {error}") from error
+        elif not isinstance(item, re.Pattern) or isinstance(item.pattern, bytes):
+            raise ValueError("replay_routes must be a list of regular expressions")
+        compiled.append(item)
+    return tuple(compiled)
 
 
-def page_cause(planned, page_url):
+def id_free(path, routes=()):
+    """A URL path with every id-like segment replaced by <id>, and a path a caller-declared pattern matches replaced
+    by that pattern (both sides of a comparison then agree on any value of the id)."""
+    for number, found in enumerate(routes):
+        if found.search(path):
+            return f"<route:{number}:{found.pattern}>"
+    return "/".join(ID_MARK if any(p.fullmatch(part) for p in ID_SEGMENTS) else part for part in path.split("/"))
+
+
+def canonical(url, routes=()):
+    """The redacted URL with its path made id-free (see id_free). Anything without a path is unchanged."""
+    url = redact_url(url)
+    origin, path, rest = URL_PATH.fullmatch(url).groups()
+    return f"{origin or ''}{id_free(path, routes)}{rest}"
+
+
+def route(url, routes=()):
+    """Host and id-free path of a redacted page URL (no query, no fragment), or None when it is not a string."""
+    return re.split(r"[?#]", canonical(url, routes), maxsplit=1)[0] if isinstance(url, str) else None
+
+
+def page_cause(planned, page_url, routes=()):
     """"page_changed" unless the action may run on the page it finds itself on, else None. back, reload, scroll and
-    wait need the same page; click, fill, select, hover and key the same host and path. A recorded page_url is
-    required (a schema 1 trace has none for a click, fill, select, hover or key, which is then not bound to a page)."""
+    wait need the same page; click, fill, select, hover and key the same host and path. An id-like path segment (a
+    UUID, a long hex run, digits, a long token) or a path a caller-declared route pattern matches is compared by
+    shape, not text, on both sides. A recorded page_url is required (a schema 1 trace has none for a click, fill,
+    select, hover or key, which is then not bound to a page)."""
     if planned.kind not in PAGE_BOUND | SAME_ROUTE:
         return None
     if planned.page_url is None and not planned.page_required and planned.kind in SAME_ROUTE:
@@ -211,13 +256,13 @@ def page_cause(planned, page_url):
     if not isinstance(planned.page_url, str) or not isinstance(page_url, str):
         return "page_changed"
     if planned.kind in PAGE_BOUND:
-        same = redact_url(planned.page_url) == redact_url(page_url)
+        same = canonical(planned.page_url, routes) == canonical(page_url, routes)
     else:
-        same = route(planned.page_url) == route(page_url)
+        same = route(planned.page_url, routes) == route(page_url, routes)
     return None if same else "page_changed"
 
 
-def control_action(planned, actions, focus=None, focus_node=None, page_url=None):
+def control_action(planned, actions, focus=None, focus_node=None, page_url=None, routes=()):
     """(the page's action, None) for a recorded key, back, reload, goto, scroll or wait, or (None, cause). The id
     carries the key chord, the declared page name or the direction, so one lookup by id checks the declaration. A
     goto must open the URL it opened (query values aside), a scroll the distance it scrolled, back, reload, scroll and
@@ -232,7 +277,7 @@ def control_action(planned, actions, focus=None, focus_node=None, page_url=None)
         return None, "goto_url_changed"
     if planned.kind == "scroll" and planned.delta != action.get("delta"):
         return None, "scroll_changed"
-    if cause := page_cause(planned, page_url):
+    if cause := page_cause(planned, page_url, routes):
         return None, cause
     if planned.kind == "key":
         if not planned.focus_recorded:
@@ -262,8 +307,9 @@ def fill_text(planned, values):
 class Replay:
     """What one replaying Agent keeps: the recorded plan per step, where it is, and which steps were healed."""
 
-    def __init__(self, source, steps, values, heal):
+    def __init__(self, source, steps, values, heal, routes=()):
         self.plan, self.locator_missing = prepare(source, steps, values)
+        self.routes = route_patterns(routes)
         self.heal = heal
         self.cursor, self.failures = [-1, 0], 0
         self.healing = None  # The step handed to the model; replay resumes at the next one.

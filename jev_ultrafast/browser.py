@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 
 from browser_harness.admin import ensure_daemon
-from browser_harness.helpers import cdp
+from browser_harness.helpers import _IPCResponseTimeout, cdp
 
 from .keys import key_events, offered_keys
 from .waits import (
@@ -49,6 +49,40 @@ class StalePage(ValueError):
     """A decision no longer refers to the observed page."""
 
 
+class ReadTimeout(StalePage, TimeoutError):
+    """A read-only CDP call got no answer in time. The page is treated as stale: observe again."""
+
+
+class MutationTimeout(RuntimeError):
+    """A CDP call that changes the page (input, navigation, key) got no answer in time. It may or may not have been
+    applied, so it is never retried and the run ends with this error."""
+
+
+# CDP methods that change the page. Everything else the library sends is a read.
+MUTATING = {
+    "Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText", "Page.navigate", "Page.reload",
+    "Page.navigateToHistoryEntry",
+}
+NAVIGATING = {"Page.navigate", "Page.reload", "Page.navigateToHistoryEntry"}
+DEFAULT_CDP_TIMEOUT_MS = 15000
+
+
+def send(method, session, timeout_s, mutation=None, **params):
+    """The one way the library sends a CDP call: with a response timeout of its own (browser-harness defaults to 5 s).
+    A timeout raises MutationTimeout for a call that changes the page, ReadTimeout for a read. `mutation` overrides
+    the method's own class (an evaluate that sets a value is a mutation)."""
+    mutating = method in MUTATING if mutation is None else mutation
+    try:
+        return cdp(method, session_id=session, _response_timeout=timeout_s, **params)
+    except _IPCResponseTimeout as error:
+        if mutating:
+            raise MutationTimeout(
+                f"{method} timed out after {timeout_s:g}s waiting for the daemon; it may have been applied, so it "
+                "was not retried"
+            ) from error
+        raise ReadTimeout(f"{method} timed out after {timeout_s:g}s waiting for the daemon") from error
+
+
 class Refused(StalePage):
     """The pointer already moved onto the target, then the press was refused. Nothing was pressed."""
 
@@ -86,6 +120,7 @@ class Browser:
     wait_timer_ms = 2000
     wait_interactive_grace_ms = 2000
     navigation_timeout_ms = 15000
+    cdp_timeout_ms = DEFAULT_CDP_TIMEOUT_MS
     activity_seen = None
     action_mark = None
     ignore = []
@@ -115,8 +150,10 @@ class Browser:
         wait_interactive_grace_ms=2000,
         on_target=None,
         viewport=DEFAULT_VIEWPORT,
+        cdp_timeout_ms=DEFAULT_CDP_TIMEOUT_MS,
     ):
         self.viewport = viewport_size(viewport)
+        self.cdp_timeout_ms = positive("cdp_timeout_ms", cdp_timeout_ms)
         self.wait_quiet_ms = non_negative("wait_quiet_ms", wait_quiet_ms)
         self.wait_timeout_ms = positive("wait_timeout_ms", wait_timeout_ms)
         self.action_settle_timeout_ms = non_negative("action_settle_timeout_ms", action_settle_timeout_ms)
@@ -137,7 +174,7 @@ class Browser:
         self.autocomplete_settle_ms = autocomplete_settle_ms
         ensure_daemon()
         # Read only when something needs it: the window choice, or run evidence (which records the browser).
-        self.version = cdp("Browser.getVersion") if new_window is None or on_target else {}
+        self.version = self.call("Browser.getVersion", session=None) if new_window is None or on_target else {}
         # In headless Chrome an owned tab in the existing window is a background tab: after a few clicks Chrome
         # throttles its frames to about 1 Hz and every pointer move then waits ~1 s for the next frame. A window of
         # its own stays at full rate. Headed Chrome was not measured and a new window is a visible one, so by default
@@ -148,10 +185,12 @@ class Browser:
         self.new_window = bool(new_window)
         self.target = None
         try:
-            self.target = cdp(
-                "Target.createTarget", url="about:blank", background=True, newWindow=self.new_window
+            self.target = self.call(
+                "Target.createTarget", session=None, url="about:blank", background=True, newWindow=self.new_window
             )["targetId"]
-            self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
+            self.session = self.call("Target.attachToTarget", session=None, targetId=self.target, flatten=True)[
+                "sessionId"
+            ]
             if on_target:
                 on_target(self.target)  # Before the first navigation, so the first load is also seen.
             width, height = self.viewport
@@ -174,8 +213,12 @@ class Browser:
                 self.close()  # Do not leak the owned tab when setup fails.
             raise
 
-    def call(self, method, **params):
-        return cdp(method, session_id=self.session, **params)
+    def call(self, method, session=False, **params):
+        """One CDP call on this browser's session (session=None: the browser itself) with the per-call timeout."""
+        timeout_s = params.pop("_response_timeout", None)
+        if timeout_s is None:
+            timeout_s = (self.navigation_timeout_ms if method in NAVIGATING else self.cdp_timeout_ms) / 1000
+        return send(method, self.session if session is False else session, timeout_s, **params)
 
     def evaluate(self, expression):
         response = self.call("Runtime.evaluate", expression=expression, returnByValue=True)
@@ -272,6 +315,7 @@ class Browser:
                         "screenshot": screenshot,
                         "keys": getattr(self, "keys", ()),
                         "urls": getattr(self, "urls", {}),
+                        "cdp_timeout_ms": self.cdp_timeout_ms,
                     }
                 )
             except StalePage:
@@ -337,6 +381,7 @@ class Browser:
                 "text": text,
                 "reveal_timeout_ms": self.reveal_timeout_ms,
                 "viewport": self.viewport,
+                "cdp_timeout_ms": self.cdp_timeout_ms,
             }
         )
         self.after_input = action
@@ -560,7 +605,7 @@ class Browser:
 
     def close(self):
         if self.target:
-            cdp("Target.closeTarget", targetId=self.target)
+            self.call("Target.closeTarget", session=None, targetId=self.target)
             self.target = None
 
 
@@ -580,12 +625,19 @@ def browser_operation(request):
     operation = request["operation"]
     session = request["session"]
 
-    def call(method, **params):
-        return cdp(method, session_id=session, **params)
+    timeout_s = request.get("cdp_timeout_ms", DEFAULT_CDP_TIMEOUT_MS) / 1000
+    selecting = operation == "act" and request["action"]["kind"] == "select"
 
-    def evaluate(expression, await_promise=False):
+    def call(method, mutation=None, **params):
+        return send(method, session, params.pop("_response_timeout", timeout_s), mutation=mutation, **params)
+
+    def evaluate(expression, await_promise=False, wait_s=0):
         extra = {"awaitPromise": True} if await_promise else {}
-        result = call("Runtime.evaluate", expression=expression, returnByValue=True, **extra)
+        # A select sets the value inside its evaluate, so an unanswered one may have been applied: a mutation.
+        result = call(
+            "Runtime.evaluate", mutation=True if selecting else None, expression=expression, returnByValue=True,
+            _response_timeout=timeout_s + wait_s, **extra,
+        )
         if result.get("exceptionDetails"):
             if operation == "act" and request["action"]["kind"] == "select":
                 raise RuntimeError("Dropdown execution was interrupted; inspect before retrying.")
@@ -667,6 +719,7 @@ def browser_operation(request):
                         + json.dumps(action)
                         + f",{timeout})",
                         await_promise=True,
+                        wait_s=timeout / 1000,
                     )
                     if not shown:
                         # A control that stays transparent is never pressed (this also blocks invisible honeypots).

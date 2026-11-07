@@ -115,6 +115,14 @@ class Agent:
     replay_quiet_ms: replay only: the quiet window stable() waits before re-reading the checks when the page-side
     tracker shows nothing pending (default 150; None always keeps the full 500 ms, which also catches rollbacks the
     tracker cannot see: WebSocket, SSE, postMessage, setInterval, ignore_urls endpoints). A model run ignores it.
+    replay_routes: replay only: a list of regular expressions for URL paths that are compared by pattern, not by text
+    (e.g. r"^/orders/[^/]+$"); a path any of them matches is the same page whatever its id. Id-like path segments (a
+    UUID, a hex run of 8 or more with a digit, digits, a 16+ character token with letters and digits) are always
+    compared by shape. A goto URL is still compared exactly.
+    cdp_timeout_ms: how long one CDP call waits for the browser (default 15000; browser-harness alone waits 5 s). A
+    read that times out is treated like a stale page (observe again); a call that changes the page (input, key,
+    navigation) that times out is never retried and ends the run with an error naming the call. Page.navigate and
+    the document wait use navigation_timeout_ms.
     goals: a string, or a list of strings and Step(goal, expect=(), values=None). Each item is one step; the model
     sees only the current step's goal, the goals already completed and the current step's check descriptions.
     Checks (jev_ultrafast.expect) are evaluated in code. A DONE choice on a step with checks is accepted only when
@@ -195,6 +203,8 @@ class Agent:
         replay=None,
         heal=True,
         replay_quiet_ms=150,
+        replay_routes=None,
+        cdp_timeout_ms=15000,
     ):
         self.viewport = viewport = viewport_size(viewport)
         steps = parse_goals(goals)
@@ -212,7 +222,8 @@ class Agent:
             raise ValueError("heal must be True or False")
         positive_int("replay_quiet_ms", replay_quiet_ms, optional=True, minimum=0)
         self.replay_quiet_ms = replay_quiet_ms
-        self.replay = recorded.Replay(replay, steps, values, heal) if replay is not None else None
+        replay_routes = recorded.route_patterns(replay_routes)
+        self.replay = recorded.Replay(replay, steps, values, heal, replay_routes) if replay is not None else None
         secrets = {
             form: name
             for source in (values, *(s.values for s in steps))
@@ -232,6 +243,7 @@ class Agent:
         positive_int("autocomplete_settle_ms", autocomplete_settle_ms, minimum=0)
         positive_int("reveal_timeout_ms", reveal_timeout_ms, minimum=0)
         positive_int("navigation_timeout_ms", navigation_timeout_ms)
+        positive_int("cdp_timeout_ms", cdp_timeout_ms)
         positive_int("wait_quiet_ms", wait_quiet_ms, minimum=0)
         positive_int("wait_timeout_ms", wait_timeout_ms)
         positive_int("action_settle_timeout_ms", action_settle_timeout_ms, minimum=0)
@@ -294,6 +306,7 @@ class Agent:
                 wait_ignore_attributes=wait_ignore_attributes,
                 wait_interactive_grace_ms=wait_interactive_grace_ms,
                 viewport=viewport,
+                cdp_timeout_ms=cdp_timeout_ms,
                 **({"on_target": self.evidence.attach} if self.evidence else {}),
             )
         except Exception:
@@ -306,6 +319,7 @@ class Agent:
             max_steps=max_steps, max_model_calls=self.max_model_calls, settle_ms=settle_ms,
             autocomplete_settle_ms=autocomplete_settle_ms, reveal_timeout_ms=reveal_timeout_ms,
             stuck_after=stuck_after, keys=list(keys), urls=dict(urls), navigation_timeout_ms=navigation_timeout_ms,
+            cdp_timeout_ms=cdp_timeout_ms,
             wait_quiet_ms=wait_quiet_ms, wait_timeout_ms=wait_timeout_ms,
             action_settle_timeout_ms=action_settle_timeout_ms, new_window=new_window,
             ignore_urls=[getattr(u, "pattern", u) for u in ignore_urls], wait_timer_ms=wait_timer_ms,
@@ -997,7 +1011,7 @@ class Agent:
         if planned.kind in recorded.ELEMENT:
             if not planned.locator:
                 return None, "locator_missing"
-            if cause := recorded.page_cause(planned, self.state["page"]["url"]):
+            if cause := recorded.page_cause(planned, self.state["page"]["url"], self.replay.routes):
                 return None, cause
             try:
                 found = self.browser.resolve(planned.locator, node=True)
@@ -1008,7 +1022,7 @@ class Agent:
         else:
             page_ = self.state["page"]
             action, cause = recorded.control_action(
-                planned, actions, page_.get("focus"), self.focus_node(planned), page_["url"]
+                planned, actions, page_.get("focus"), self.focus_node(planned), page_["url"], self.replay.routes
             )
         if cause:
             return None, cause
