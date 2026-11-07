@@ -437,9 +437,10 @@ def test_a_rollback_from_a_setinterval_is_caught_by_the_full_window_only(lab):
     assert state["status"] == "done" and state["verified"]
     agent.close()
     chooser.forbid = True
-    # replay_quiet_ms=None keeps the whole 500 ms window, which sees the interval take the press back at 420 ms.
+    # replay_quiet_ms=None keeps the whole 500 ms window, which sees the interval take the press back at 320 ms
+    # (170 ms after the default window ends, 180 ms before this one does).
     again, stopped, _model, _wall = lab.run(
-        url="steps_interval.html?revert=420", goals=goals, chooser=chooser, replay=lab.trace(agent), heal=False,
+        url="steps_interval.html?revert=320", goals=goals, chooser=chooser, replay=lab.trace(agent), heal=False,
         replay_quiet_ms=None,
     )
     assert stopped["status"] == "diverged" and stopped["verified"] is False
@@ -568,8 +569,59 @@ def test_a_setinterval_rollback_is_not_seen_by_the_default_150_ms_window(lab):
     assert state["status"] == "done" and state["verified"]
     agent.close()
     chooser.forbid = True
-    # Documented: the default quiet window (150 ms) ends before the interval takes the press back at 420 ms.
+    # Documented: the default quiet window (150 ms) ends long before the interval takes the press back at 1500 ms.
     again, replayed, _model, _wall = lab.run(
-        url="steps_interval.html?revert=420", goals=goals, chooser=chooser, replay=lab.trace(agent), heal=False
+        url="steps_interval.html?revert=1500", goals=goals, chooser=chooser, replay=lab.trace(agent), heal=False
+    )
+    assert replayed["status"] == "done" and sources(replayed) == ["replay"]
+
+
+# --- id-tolerant routes -------------------------------------------------------------------------------------------
+
+ID_A, ID_B = "3f2b8c1e-5d4a-4e7b-9c6d-1a2b3c4d5e6f", "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+ID_GOALS = [Step("Open the settings", expect=expect.text("Settings opened"))]
+
+
+def settings_chooser():
+    return pick_chooser(
+        lambda page, c: next(a["id"] for a in page["actions"] if a["kind"] == "click" and a["label"] == "Open settings")
+    )
+
+
+def test_a_replay_runs_on_another_resource_id_with_no_model_call(lab):
+    chooser = settings_chooser()
+    agent, state, _model, _wall = lab.run(url=f"items/{ID_A}/replay_id.html", goals=ID_GOALS, chooser=chooser)
+    assert state["status"] == "done" and state["verified"]
+    agent.close()
+    chooser.forbid = True
+    again, replayed, _model, _wall = lab.run(
+        url=f"items/{ID_B}/replay_id.html", goals=ID_GOALS, chooser=chooser, replay=lab.trace(agent), heal=False
+    )
+    assert replayed["status"] == "done" and sources(replayed) == ["replay"]
+    assert replayed["replay"]["model_calls"] == 0 and replayed["replay"]["steps_healed"] == 0
+    assert chooser.calls == []
+
+
+def test_a_replay_on_a_path_that_is_not_an_id_is_still_another_page(lab):
+    chooser = settings_chooser()
+    agent, state, _model, _wall = lab.run(url=f"items/{ID_A}/replay_id.html", goals=ID_GOALS, chooser=chooser)
+    assert state["status"] == "done"
+    agent.close()
+    chooser.forbid = True
+    again, stopped, _model, _wall = lab.run(
+        url="items/new/replay_id.html", goals=ID_GOALS, chooser=chooser, replay=lab.trace(agent), heal=False
+    )
+    assert stopped["status"] == "diverged" and stopped["stop_reason"] == "page_changed at step 1"
+
+
+def test_a_declared_route_pattern_lets_a_replay_run_on_another_path(lab):
+    chooser = settings_chooser()
+    agent, state, _model, _wall = lab.run(url="items/alpha/replay_id.html", goals=ID_GOALS, chooser=chooser)
+    assert state["status"] == "done"
+    agent.close()
+    chooser.forbid = True
+    again, replayed, _model, _wall = lab.run(
+        url="items/beta/replay_id.html", goals=ID_GOALS, chooser=chooser, replay=lab.trace(agent), heal=False,
+        replay_routes=[r"^/items/[^/]+/replay_id\.html$"],
     )
     assert replayed["status"] == "done" and sources(replayed) == ["replay"]

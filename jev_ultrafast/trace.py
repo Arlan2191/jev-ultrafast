@@ -14,7 +14,7 @@ from pathlib import Path
 
 SCHEMA = 2
 READABLE = (1, 2)
-SCHEMA_2_EVENTS = frozenset({"heal"})
+SCHEMA_2_EVENTS = frozenset({"heal", "mutation_timeout"})
 
 # Required fields per event type (beyond t_ms and type). Writers may add fields; readers must ignore unknown ones.
 EVENTS = {
@@ -31,6 +31,7 @@ EVENTS = {
     "denied": ("reason", "action", "kind"),
     "done_rejected": ("failed",),
     "heal": ("step", "cause", "healed", "model_calls"),
+    "mutation_timeout": ("index", "method", "label", "kind"),
     "run_end": ("status", "stop_reason", "verified", "totals", "screenshot"),
 }
 

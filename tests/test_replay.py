@@ -8,7 +8,7 @@ import pytest
 
 from jev_ultrafast import ActionDenied, Agent, Step, Value, expect
 from jev_ultrafast import agent as loop
-from jev_ultrafast.browser import Refused, StalePage, fingerprint
+from jev_ultrafast.browser import MutationTimeout, ReadTimeout, Refused, StalePage, fingerprint
 from jev_ultrafast.trace import load_trace
 from jev_ultrafast.waits import WaitResult
 
@@ -1125,3 +1125,305 @@ def test_replay_uses_the_callers_viewport_not_the_recorded_one(journey):
     start = load_trace(journey.tmp_path / "replayed" / "trace.jsonl")[0]
     assert recorded == {"width": 1120, "height": 780}
     assert start["viewport"] == {"width": 1470, "height": 920}
+
+
+# --- id-tolerant routes -------------------------------------------------------------------------------------------
+
+UUID_A, UUID_B = "3f2b8c1e-5d4a-4e7b-9c6d-1a2b3c4d5e6f", "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+
+
+@pytest.mark.parametrize(
+    "a,b,same",
+    [
+        (f"/chat/{UUID_A}", f"/chat/{UUID_B}", True),
+        (f"/chat/{UUID_A.upper()}", f"/chat/{UUID_B}", True),
+        ("/chat/new", f"/chat/{UUID_A}", False),
+        ("/a/123", "/a/124", True),
+        ("/a/123", "/a/settings", False),
+        ("/a/settings", "/a/admin", False),
+        ("/o/deadbeef01", "/o/0badcafe99", True),  # Hex run of 8+ with a digit.
+        ("/o/deadbeef", "/o/facecafe", False),  # No digit: a word, not an id.
+        ("/o/abc123", "/o/def456", False),  # Hex but shorter than 8.
+        ("/s/Zm9vYmFyMTIzNDU2Nzg5", "/s/QmF6cXV4OTg3NjU0MzIx", True),  # base64url-ish, letters and digits.
+        ("/s/averyverylongsegmentname", "/s/anotherverylongsegmentx", False),  # 16+ but no digit.
+        (f"/chat/{UUID_A}/messages", f"/chat/{UUID_B}/messages", True),
+        (f"/chat/{UUID_A}/messages", f"/chat/{UUID_B}/files", False),
+        (f"/chat/{UUID_A}", f"/room/{UUID_B}", False),
+    ],
+)
+def test_id_like_path_segments_are_compared_by_shape(a, b, same):
+    from jev_ultrafast import replay
+
+    host = "https://example.test"
+    assert (replay.route(host + a) == replay.route(host + b)) is same
+    planned = replay.Planned("click", "x", page_url=host + a)
+    assert (replay.page_cause(planned, host + b) is None) is same
+    wait = replay.Planned("wait", "wait", page_url=host + a + "?q=<redacted>")
+    assert (replay.page_cause(wait, host + b + "?q=1") is None) is same
+
+
+def test_a_page_bound_kind_still_needs_the_same_query_keys_and_host():
+    from jev_ultrafast import replay
+
+    wait = replay.Planned("reload", "reload", page_url=f"https://example.test/chat/{UUID_A}?tab=<redacted>")
+    assert replay.page_cause(wait, f"https://example.test/chat/{UUID_B}?tab=2") is None
+    assert replay.page_cause(wait, f"https://example.test/chat/{UUID_B}?other=2") == "page_changed"
+    assert replay.page_cause(wait, f"https://other.test/chat/{UUID_B}?tab=2") == "page_changed"
+
+
+def test_a_goto_url_check_stays_exact():
+    from jev_ultrafast import replay
+
+    goto = replay.Planned("goto", "goto:chat", url=f"https://example.test/chat/{UUID_A}")
+    declared = {"id": "goto:chat", "kind": "goto", "url": f"https://example.test/chat/{UUID_B}"}
+    assert replay.control_action(goto, [declared]) == (None, "goto_url_changed")
+
+
+def test_a_declared_route_pattern_is_compared_by_pattern():
+    from jev_ultrafast import replay
+
+    routes = replay.route_patterns([r"^/orders/[^/]+$"])
+    host = "https://example.test"
+    assert replay.route(host + "/orders/pending", routes) == replay.route(host + "/orders/archived", routes)
+    assert replay.route(host + "/orders/pending") != replay.route(host + "/orders/archived")
+    assert replay.route(host + "/orders/pending", routes) != replay.route(host + "/invoices/pending", routes)
+    assert replay.route(host + "/orders/a/b", routes) != replay.route(host + "/orders/a/c", routes)
+    planned = replay.Planned("fill", "x", page_url=host + "/orders/pending")
+    assert replay.page_cause(planned, host + "/orders/archived") == "page_changed"
+    assert replay.page_cause(planned, host + "/orders/archived", routes) is None
+
+
+@pytest.mark.parametrize("bad", ["^/a$", (1,), [1], ["("], [b"x"], {"a": 1}])
+def test_replay_routes_must_be_a_list_of_regular_expressions(bad):
+    from jev_ultrafast import replay
+
+    with pytest.raises(ValueError, match="replay_routes"):
+        replay.route_patterns(bad)
+
+
+def test_replay_routes_accepts_compiled_patterns_and_none():
+    import re
+
+    from jev_ultrafast import replay
+
+    assert replay.route_patterns(None) == ()
+    assert replay.route_patterns([re.compile("^/x$")])[0].pattern == "^/x$"
+
+
+def test_an_agent_with_a_bad_replay_route_opens_no_browser(monkeypatch):
+    opened = Mock()
+    monkeypatch.setattr(loop, "Browser", opened)
+    with pytest.raises(ValueError, match="replay_routes"):
+        Agent("https://example.test/", "goal", replay_routes=["("])
+    opened.assert_not_called()
+
+
+# --- fullmatch routes, the id-segment switch ------------------------------------------------------------------
+
+
+def test_a_declared_route_pattern_must_match_the_whole_path():
+    from jev_ultrafast import replay
+
+    host = "https://example.test"
+    unanchored = replay.route_patterns([r"/orders/"])
+    assert replay.route(host + "/orders/1/cancel", unanchored) != replay.route(host + "/orders/2/refund", unanchored)
+    assert replay.route(host + "/orders/1/cancel", unanchored) == replay.route(host + "/orders/2/cancel", ())  # ids
+    prefix = replay.route_patterns([r"^/orders/[^/]+"])
+    assert replay.route(host + "/orders/pending", prefix) == replay.route(host + "/orders/archived", prefix)
+    assert replay.route(host + "/orders/pending", prefix) != replay.route(host + "/orders/pending/delete", prefix)
+    planned = replay.Planned("click", "x", page_url=host + "/orders/1/cancel")
+    assert replay.page_cause(planned, host + "/orders/2/refund", unanchored) == "page_changed"
+    whole = replay.route_patterns([r"/orders/.*"])  # Matching everything below is still possible, on purpose.
+    assert replay.page_cause(planned, host + "/orders/2/refund", whole) is None
+
+
+def test_id_segments_off_compares_paths_exactly_and_declared_routes_still_apply():
+    from jev_ultrafast import replay
+
+    host = "https://example.test"
+    planned = replay.Planned("click", "x", page_url=f"{host}/users/123/delete")
+    assert replay.page_cause(planned, f"{host}/users/124/delete") is None
+    assert replay.page_cause(planned, f"{host}/users/124/delete", id_segments=False) == "page_changed"
+    assert replay.page_cause(planned, f"{host}/users/123/delete", id_segments=False) is None
+    wait = replay.Planned("wait", "wait", page_url=f"{host}/chat/{UUID_A}?q=<redacted>")
+    assert replay.page_cause(wait, f"{host}/chat/{UUID_B}?q=1", id_segments=False) == "page_changed"
+    routes = replay.route_patterns([r"/users/[^/]+/delete"])
+    assert replay.page_cause(planned, f"{host}/users/124/delete", routes, id_segments=False) is None
+
+
+@pytest.mark.parametrize("bad", ["yes", 1, None])
+def test_replay_id_segments_must_be_a_bool_and_opens_no_browser(bad, monkeypatch):
+    opened = Mock()
+    monkeypatch.setattr(loop, "Browser", opened)
+    with pytest.raises(ValueError, match="replay_id_segments"):
+        Agent("https://example.test/", "goal", replay_id_segments=bad)
+    opened.assert_not_called()
+
+
+def test_a_replay_on_another_id_runs_by_default_and_diverges_with_id_segments_off(journey):
+    journey.page_args = {"url": "https://example.test/users/123/delete"}
+    trace = journey.record()
+    journey.page_args = {"url": "https://example.test/users/124/delete"}
+    _agent, final = journey.replay(trace)
+    assert final["status"] == "done" and journey.asked == []
+    journey.reset()
+    _agent, final = journey.replay(trace, name="exact", replay_id_segments=False, heal=False)
+    assert final["status"] == "diverged" and final["stop_reason"] == "page_changed at step 1"
+    assert journey.executed == []
+
+
+# --- a timeout in the middle of a replay or a run -------------------------------------------------------------
+
+
+def test_a_mutation_timeout_ends_the_run_failed_and_the_action_is_never_sent_again(journey):
+    journey.act_error = [MutationTimeout("Input.dispatchMouseEvent timed out after 15s", "Input.dispatchMouseEvent")]
+    journey.script = [("c20", "CLICK")]
+    agent = journey.agent("lost")
+    final = journey.run(agent)
+    assert final["status"] == "failed" and final["stop_reason"] == "mutation_timeout: Input.dispatchMouseEvent"
+    assert [(h["kind"], h["executed"]) for h in final["history"]] == [("click", "unknown")]
+    assert journey.browser.act.call_count == 1
+    with pytest.raises(ValueError, match="stopped"):  # A later tick never reaches act again.
+        agent.command("tick")
+    assert journey.browser.act.call_count == 1
+    events = load_trace(journey.tmp_path / "lost" / "trace.jsonl")
+    timed_out = next(e for e in events if e["type"] == "mutation_timeout")
+    assert timed_out["method"] == "Input.dispatchMouseEvent" and timed_out["kind"] == "click"
+    action = next(e for e in events if e["type"] == "action")
+    assert action["executed"] == "unknown" and action["index"] == timed_out["index"] == 1
+    assert events[-1]["type"] == "run_end" and events[-1]["stop_reason"] == "mutation_timeout: Input.dispatchMouseEvent"
+    assert events[-1]["status"] == "failed"
+
+
+def test_a_mutation_timeout_in_a_replay_ends_the_run_the_same_way(journey):
+    trace = journey.record()
+    journey.act_error = [None, MutationTimeout("Input.insertText timed out", "Input.insertText")]
+    _agent, final = journey.replay(trace)
+    assert final["status"] == "failed" and final["stop_reason"] == "mutation_timeout: Input.insertText"
+    assert [h.get("executed") for h in final["history"]] == [None, "unknown"]
+    assert len(journey.executed) == 1 and journey.asked == []  # The fill ran; the one that timed out never did again.
+
+
+def test_a_read_timeout_when_resolving_in_a_replay_looks_again_instead_of_diverging(journey):
+    trace = journey.record()
+    answers = [ReadTimeout("Runtime.evaluate timed out")]
+    original = journey.resolve
+
+    def resolve(locator, node=False):
+        if answers:
+            raise answers.pop()
+        return original(locator, node)
+
+    journey.browser.resolve.side_effect = resolve
+    _agent, final = journey.replay(trace, heal=False)
+    assert final["status"] == "done" and journey.asked == [] and final["replay"]["steps_healed"] == 0
+
+
+@pytest.mark.parametrize("heal", [False, True])
+def test_a_resolve_that_always_times_out_ends_a_replay_in_a_bounded_number_of_ticks(journey, heal):
+    trace = journey.record()
+    journey.browser.resolve.side_effect = ReadTimeout("Runtime.evaluate timed out")
+    _agent, final = journey.replay(trace, heal=heal)
+    assert final["status"] == "failed" and final["stop_reason"] == "read_timeout"
+    assert journey.executed == [] and journey.asked == []
+    assert journey.browser.resolve.call_count == 3
+
+
+@pytest.mark.parametrize("heal", [False, True])
+def test_a_focus_read_that_always_times_out_ends_a_replay_too(journey, heal, monkeypatch):
+    trace = journey.record()
+    reads = []
+
+    def focus_node(_self, _planned):
+        reads.append(1)
+        raise ReadTimeout("Runtime.evaluate timed out")
+
+    # A recorded key step reads the focused element through focus_node; the journey has none, so the first
+    # replayed action stands in for it.
+    monkeypatch.setattr(Agent, "replay_decision", lambda self, planned: focus_node(self, planned))
+    _agent, final = journey.replay(trace, heal=heal)
+    assert final["status"] == "failed" and final["stop_reason"] == "read_timeout"
+    assert len(reads) == 3 and journey.executed == []
+
+
+def test_a_single_read_timeout_still_recovers_and_the_count_starts_over(journey):
+    trace = journey.record()
+    original = journey.resolve
+    calls = []
+
+    def resolve(locator, node=False):
+        calls.append(1)
+        if len(calls) % 2:
+            raise ReadTimeout("Runtime.evaluate timed out")
+        return original(locator, node)
+
+    journey.browser.resolve.side_effect = resolve
+    _agent, final = journey.replay(trace, heal=False)
+    assert final["status"] == "done" and journey.asked == []
+
+
+def test_a_read_timeout_when_resolving_a_key_focus_is_not_a_missing_focus():
+    agent = Agent.__new__(Agent)
+    agent.browser = Mock(resolve=Mock(side_effect=ReadTimeout("Runtime.evaluate timed out")))
+    planned = Mock(kind="key", focus_locator={"role": "textbox"})
+    with pytest.raises(ReadTimeout):
+        agent.focus_node(planned)
+    agent.browser.resolve.side_effect = RuntimeError("gone")
+    assert agent.focus_node(planned) is None
+
+
+def test_two_read_timeouts_in_a_row_end_a_replay_failed_instead_of_raising(journey):
+    trace = journey.record()
+    calls = []
+
+    def observe(**_kw):
+        calls.append(1)
+        if len(calls) > 1:
+            raise ReadTimeout("Runtime.evaluate timed out")
+        return page()
+
+    journey.browser.observe.side_effect = observe
+    journey.browser.fresh.return_value = False  # Every tick wants a fresh look.
+    _agent, final = journey.replay(trace)
+    assert final["status"] == "failed" and final["stop_reason"] == "read_timeout"
+    assert journey.executed == []
+
+
+def test_two_read_timeouts_in_a_row_end_a_model_run_failed_and_the_tick_re_observe_is_protected(journey):
+    calls = []
+
+    def observe(**_kw):
+        calls.append(1)
+        if len(calls) > 1:
+            raise ReadTimeout("Runtime.evaluate timed out")
+        return page()
+
+    journey.browser.observe.side_effect = observe
+    journey.browser.fresh.side_effect = ReadTimeout("Runtime.evaluate timed out")
+    journey.script = [("c20", "CLICK")]
+    agent = journey.agent("slow")
+    final = journey.run(agent)
+    assert final["status"] == "failed" and final["stop_reason"] == "read_timeout"
+    journey.browser.act.assert_not_called()
+
+
+def test_a_locator_read_is_tried_once_more_after_a_read_timeout(journey):
+    answers = [ReadTimeout("Runtime.evaluate timed out")]
+    original = journey.browser.locator.side_effect
+
+    def locator(node, full_urls=False):
+        if answers:
+            raise answers.pop()
+        return original(node, full_urls)
+
+    journey.browser.locator.side_effect = locator
+    trace = journey.record()
+    actions = [e for e in load_trace(trace) if e["type"] == "action"]
+    assert all(e["locator"] and not e.get("locator_error") for e in actions)
+    journey.browser.locator.side_effect = Mock(side_effect=ReadTimeout("slow"))
+    agent = journey.agent("twice")
+    journey.script = [("f10", "TYPE_TEXT", "query"), ("c20", "CLICK"), ("c40", "CLICK"), ("c50", "CLICK")]
+    journey.run(agent)
+    again = [e for e in load_trace(journey.tmp_path / "twice" / "trace.jsonl") if e["type"] == "action"]
+    assert {e["locator_error"] for e in again} == {"ReadTimeout"}
+    assert journey.browser.locator.side_effect.call_count == 8  # Each of the 4 actions read twice, then gave up.
