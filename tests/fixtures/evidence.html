@@ -7,13 +7,15 @@
 <p id="status">idle</p>
 <script>
   console.log('page loaded', 42);
-  fetch('/api/0').catch(() => {});
+  // Chrome reports a response as finished only once its body is read.
+  const read = response => response.text();
+  fetch('/api/0').then(read).catch(() => {});
   document.getElementById('run').addEventListener('click', () => {
     console.log('hello', {a: 1});
     console.warn('careful now');
     console.error('something broke');
     setTimeout(() => { throw new Error('uncaught boom'); }, 0);
-    fetch('/api/5').then(() => fetch('/missing-resource')).catch(() => {});
+    fetch('/api/5').then(read).then(() => fetch('/missing-resource')).then(read).catch(() => {});
     fetch('http://127.0.0.1:1/unreachable').catch(() => {});
     document.getElementById('status').textContent = 'ran';
   });
