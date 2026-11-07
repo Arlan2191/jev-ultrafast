@@ -4,6 +4,7 @@ Pure functions only: load and check a trace against the steps the caller passes,
 and map a re-resolved locator to the action the current page offers. The agent loop (agent.py) drives them.
 """
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,7 +43,8 @@ class Planned:
     focus: dict | None = None
     focus_recorded: bool = False  # False for a schema 1 trace: it never wrote the focus of a key.
     focus_locator: dict | None = None  # Where the focused element is, resolved like a click's locator.
-    page_url: str | None = None  # The page the action ran on (redacted), checked for back, reload, scroll and wait.
+    page_url: str | None = None  # The page the action ran on (redacted), checked for every kind but goto.
+    page_required: bool = True  # False for a schema 1 trace: it never wrote the page of a click, fill, select or hover.
 
     @property
     def operation(self):
@@ -105,6 +107,7 @@ def match(events, steps, values):
 def plan(events, count):
     """[[Planned, ...] per step]: the executed actions of the run, grouped by the step they ran in."""
     steps, current = [[] for _ in range(count)], 0
+    page_required = events[0].get("trace_schema") != 1
     for event in events:
         if event["type"] == "step" and event["status"] == "active":
             current = event["index"]
@@ -127,6 +130,7 @@ def plan(events, count):
                         focus_recorded="focus" in event,
                         focus_locator=event.get("focus_locator"),
                         page_url=event.get("page_url"),
+                        page_required=page_required,
                     )
                 )
     return steps
@@ -187,16 +191,39 @@ def focus_of(focus):
     return {**{k: focus.get(k) for k in FOCUS_FIELDS}, "href": redact_url(focus.get("href"))}
 
 
-PAGE_BOUND = {"back", "reload", "scroll", "wait"}
+PAGE_BOUND = {"back", "reload", "scroll", "wait"}  # Same page: scheme, host, path and query keys.
+SAME_ROUTE = ELEMENT | {"key"}  # Mutating kinds: same host and path (the query may vary more, e.g. a page number).
+
+
+def route(url):
+    """Host and path of a redacted page URL (no query, no fragment), or None when it is not a string."""
+    return re.split(r"[?#]", redact_url(url), maxsplit=1)[0] if isinstance(url, str) else None
+
+
+def page_cause(planned, page_url):
+    """"page_changed" unless the action may run on the page it finds itself on, else None. back, reload, scroll and
+    wait need the same page; click, fill, select, hover and key the same host and path. A recorded page_url is
+    required (a schema 1 trace has none for a click, fill, select, hover or key, which is then not bound to a page)."""
+    if planned.kind not in PAGE_BOUND | SAME_ROUTE:
+        return None
+    if planned.page_url is None and not planned.page_required and planned.kind in SAME_ROUTE:
+        return None
+    if not isinstance(planned.page_url, str) or not isinstance(page_url, str):
+        return "page_changed"
+    if planned.kind in PAGE_BOUND:
+        same = redact_url(planned.page_url) == redact_url(page_url)
+    else:
+        same = route(planned.page_url) == route(page_url)
+    return None if same else "page_changed"
 
 
 def control_action(planned, actions, focus=None, focus_node=None, page_url=None):
     """(the page's action, None) for a recorded key, back, reload, goto, scroll or wait, or (None, cause). The id
     carries the key chord, the declared page name or the direction, so one lookup by id checks the declaration. A
     goto must open the URL it opened (query values aside), a scroll the distance it scrolled, back, reload, scroll and
-    wait the page they ran on (`page_url` is the page now), and a key goes to the element that had focus when it was
-    recorded: `focus` is the page's focus now and `focus_node` the node the recorded focus locator resolves to now (a
-    focused element must resolve like a click, to the node that has focus)."""
+    wait the page they ran on and a key the host and path it ran on (`page_url` is the page now), and a key goes to
+    the element that had focus when it was recorded: `focus` is the page's focus now and `focus_node` the node the
+    recorded focus locator resolves to now (a focused element must resolve like a click, to the node that has focus)."""
     found = [a for a in actions if a["id"] == planned.choice and a["kind"] == planned.kind]
     if len(found) != 1:
         return None, "control_not_offered"
@@ -205,10 +232,8 @@ def control_action(planned, actions, focus=None, focus_node=None, page_url=None)
         return None, "goto_url_changed"
     if planned.kind == "scroll" and planned.delta != action.get("delta"):
         return None, "scroll_changed"
-    if planned.kind in PAGE_BOUND and (
-        not isinstance(planned.page_url, str) or redact_url(planned.page_url) != redact_url(page_url)
-    ):
-        return None, "page_changed"
+    if cause := page_cause(planned, page_url):
+        return None, cause
     if planned.kind == "key":
         if not planned.focus_recorded:
             return None, "focus_changed"

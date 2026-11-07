@@ -988,6 +988,8 @@ class Agent:
         if planned.kind in recorded.ELEMENT:
             if not planned.locator:
                 return None, "locator_missing"
+            if cause := recorded.page_cause(planned, self.state["page"]["url"]):
+                return None, cause
             try:
                 found = self.browser.resolve(planned.locator, node=True)
             except Exception:

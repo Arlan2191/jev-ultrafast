@@ -325,8 +325,9 @@ def test_resolve_results_map_to_the_matching_action_or_a_cause():
     assert replay.element_action(P("hover", "x"), actions, 5) == (None, "kind_not_offered")
     twice = actions + [{"id": "a2", "kind": "click", "node": 5, "label": "A again"}]
     assert replay.element_action(P("click", "x"), twice, 5) == (None, "ambiguous")
-    key = P("key", "key:Enter", focus_recorded=True)
-    assert replay.control_action(key, [{"id": "key:Enter", "kind": "key"}])[0]["id"] == "key:Enter"
+    key = P("key", "key:Enter", focus_recorded=True, page_url="https://example.test/")
+    here = "https://example.test/"
+    assert replay.control_action(key, [{"id": "key:Enter", "kind": "key"}], page_url=here)[0]["id"] == "key:Enter"
     assert replay.control_action(P("key", "key:Tab", focus_recorded=True), [{"id": "key:Enter", "kind": "key"}]) == (
         None,
         "control_not_offered",
@@ -908,17 +909,22 @@ LINK = {"role": "link", "label": "Read more", "href": "/a/1", "tag": "a", "type"
 def test_two_look_alike_focused_links_with_different_hrefs_are_not_the_same_focus():
     from jev_ultrafast import replay
 
-    key = replay.Planned("key", "key:Enter", focus=LINK, focus_recorded=True, focus_locator={"name": "Read more"})
+    HERE = "https://example.test/"
+
+    key = replay.Planned("key", "key:Enter", focus=LINK, focus_recorded=True, focus_locator={"name": "Read more"},
+                         page_url=HERE)
     actions = [{"id": "key:Enter", "kind": "key"}]
-    assert replay.control_action(key, actions, LINK, focus_node=10)[1] is None
+    assert replay.control_action(key, actions, LINK, focus_node=10, page_url=HERE)[1] is None
     other = {**LINK, "href": "/a/2"}
-    assert replay.control_action(key, actions, other, focus_node=10) == (None, "focus_changed")
+    assert replay.control_action(key, actions, other, focus_node=10, page_url=HERE) == (None, "focus_changed")
     # The query VALUES are redacted in the trace and never compared; the keys are.
     recorded = replay.Planned(
-        "key", "key:Enter", focus={**LINK, "href": "/a?id=<redacted>"}, focus_recorded=True, focus_locator={"x": 1}
+        "key", "key:Enter", focus={**LINK, "href": "/a?id=<redacted>"}, focus_recorded=True, focus_locator={"x": 1},
+        page_url=HERE,
     )
-    assert replay.control_action(recorded, actions, {**LINK, "href": "/a?id=7"}, focus_node=10)[1] is None
-    assert replay.control_action(recorded, actions, {**LINK, "href": "/a?other=7"}, focus_node=10)[1] == "focus_changed"
+    same, other_keys = {**LINK, "href": "/a?id=7"}, {**LINK, "href": "/a?other=7"}
+    assert replay.control_action(recorded, actions, same, focus_node=10, page_url=HERE)[1] is None
+    assert replay.control_action(recorded, actions, other_keys, focus_node=10, page_url=HERE)[1] == "focus_changed"
 
 
 def test_a_focused_element_must_resolve_like_a_click_to_the_focused_node(journey):
@@ -1032,3 +1038,80 @@ def test_the_plan_carries_the_page_url_and_the_focus_locator():
     ]
     (key,) = replay.plan(events, 1)[0]
     assert key.focus_locator == {"name": "x"} and key.page_url == "https://example.test/a"
+
+
+# --- fix round 3: the page binding of every kind ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["click", "fill", "select", "hover", "key"])
+def test_a_mutating_kind_needs_the_recorded_host_and_path(kind):
+    from jev_ultrafast import replay
+
+    def planned(**over):
+        return replay.Planned(kind, "x", page_url="https://example.test/list?page=<redacted>", **over)
+
+    here = "https://example.test/list?page=2"
+    assert replay.page_cause(planned(), here) is None
+    assert replay.page_cause(planned(), "https://example.test/list?other=1#top") is None  # Query and fragment vary.
+    for moved in ("https://example.test/elsewhere", "https://example.test/list/2", "https://other.test/list?page=2",
+                  "http://example.test/list?page=2", None):
+        assert replay.page_cause(planned(), moved) == "page_changed", moved
+    assert replay.page_cause(replay.Planned(kind, "x"), here) == "page_changed"  # Schema 2 always says where.
+    old = replay.Planned(kind, "x", page_required=False)
+    assert replay.page_cause(old, here) is None  # Schema 1 never did.
+
+
+def test_goto_is_not_bound_to_a_page():
+    from jev_ultrafast import replay
+
+    goto = replay.Planned("goto", "goto:home", url="https://example.test/")
+    assert replay.page_cause(goto, "https://x.test/") is None
+
+
+def test_a_click_runs_only_on_the_route_it_was_recorded_on(journey):
+    trace = journey.record()
+    journey.page_args = {"url": "https://example.test/?page=2"}  # Same host and path, other query: still replayed.
+    _agent, final = journey.replay(trace, heal=False)
+    assert final["status"] == "done" and journey.asked == []
+
+    journey.reset()
+    journey.page_args = {"url": "https://example.test/settings"}
+    _agent, final = journey.replay(trace, name="other-path", heal=False)
+    assert final["status"] == "diverged" and final["stop_reason"] == "page_changed at step 1"
+    assert journey.executed == []
+
+    journey.reset()
+    journey.page_args = {"url": "https://other.test/"}
+    _agent, final = journey.replay(trace, name="other-host", heal=False)
+    assert final["stop_reason"] == "page_changed at step 1" and journey.executed == []
+
+
+def test_a_heal_that_leaves_the_route_does_not_replay_the_next_recorded_click(journey):
+    trace = journey.record()
+    journey.reset()
+    plain_act = journey.act
+
+    def act(action, page_, text=None):
+        result = plain_act(action, page_, text)
+        if action.get("node") == 20:  # The healed step's Go opens another page.
+            journey.page_args = {"url": "https://example.test/elsewhere"}
+        return result
+
+    journey.browser.act.side_effect = act
+    journey.resolves["Search"] = found("Search", rule="ambiguous", verified=False)
+    journey.script = [("f10", "TYPE_TEXT", "query"), ("c20", "CLICK"), ("c40", "CLICK"), ("c50", "CLICK")]
+    _agent, final = journey.replay(trace)
+    assert final["status"] == "done" and sources(final) == ["model"] * 4
+    causes = [(e["step"], e["cause"]) for e in load_trace(journey.tmp_path / "replayed" / "trace.jsonl")
+              if e["type"] == "heal"]
+    assert causes == [(0, "ambiguous"), (1, "page_changed"), (2, "page_changed")]
+    assert len(journey.asked) == 4  # Step 1 fill and Go, then Row B and Pin.
+
+
+def test_a_schema_1_click_is_not_bound_to_a_page(journey, tmp_path):
+    old = as_schema_1(load_trace(journey.record()))
+    path = tmp_path / "old-pages.jsonl"
+    path.write_text("".join(json.dumps(e) + "\n" for e in old))
+    journey.page_args = {"url": "https://example.test/elsewhere"}
+    _agent, final = journey.replay(path, heal=False)
+    assert final["status"] == "done"

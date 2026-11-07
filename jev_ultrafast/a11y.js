@@ -162,6 +162,15 @@
       return (path+(query ? '?'+query : '')+(u.hash.length>1 ? '#<redacted>' : '')).slice(0,2048);
     } catch { return null; }
   };
+  // The scheme and host (with port) a link leaves for: a relative link carries the page's own. Null for anything that is
+  // not an http(s) link. A hostname is not a secret, so it is recorded as it is (never userinfo: an origin has none).
+  const originOf = e => {
+    if (e.tagName!=='A' || e.getAttribute('href')===null) return null;
+    try {
+      const u=new URL(e.href, location.href);
+      return ['http:','https:'].includes(u.protocol) ? u.origin : null;
+    } catch { return null; }
+  };
   const locator = (e, full=false) => {
     // Not in this document (a shadow root or a frame): it could never be found again by `resolve`.
     if (!e || !e.isConnected || !document.contains(e)) return null;
@@ -183,7 +192,7 @@
     const r=e.getBoundingClientRect();
     return {
       role: rname, name: ename, tag, type,
-      href: linkOf(e, full), label_for: label, placeholder: e.getAttribute('placeholder'), test_id: attr,
+      href: linkOf(e, full), href_origin: originOf(e), label_for: label, placeholder: e.getAttribute('placeholder'), test_id: attr,
       test_id_unique: attr ? withTestId(attr).length===1 : null,
       id: anchorId(e.id) ? e.id : null, id_unique: anchorId(e.id) ? withId(e.id)===1 : null, scope,
       ordinal: {scope: inScope.indexOf(e), scope_count: inScope.length,
@@ -197,11 +206,13 @@
   };
   // Does the element still look like the one that was recorded: same tag, same type, same role (when recorded), the
   // same clipped accessible name, for anything that has text the same clipped text and, for a link whose recorded
-  // href is known, the same target (path and query keys: query values are redacted in a trace).
+  // href is known, the same target (path and query keys: query values are redacted in a trace) and, when its origin
+  // was recorded, the same scheme and host.
   const verifies = (e, loc) => !!e && e.tagName.toLowerCase()===loc.tag && (e.type ?? null)===(loc.type ?? null) &&
     (!loc.role || role(e)===loc.role) && (loc.name===undefined || clip(name(e))===loc.name) &&
     (typeof loc.text!=='string' || textOf(e)===loc.text) &&
-    (typeof loc.href!=='string' || hrefKey(loc.href)===hrefKey(linkOf(e, true)));
+    (typeof loc.href!=='string' || hrefKey(loc.href)===hrefKey(linkOf(e, true))) &&
+    (typeof loc.href_origin!=='string' || loc.href_origin===originOf(e));
   // The element a recorded locator points at on the page as it is now, or null; never another element.
   // {element, rule, unique, count_match, verified}. The primary rule (role_name_scope) takes the role + name matches
   // inside the scope (itself found by role + name + ordinal) and accepts one only when the recorded in-scope count
