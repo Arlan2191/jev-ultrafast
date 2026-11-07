@@ -549,7 +549,7 @@ class Agent:
                     raise StalePage("Page changed before text generation. Choose again.")
                 if decision.get("value") == NONE:
                     # No declared value fits and there is no text helper: type nothing, and leave this field out of
-                    # the next choice (a refusal, so it also counts toward stuck_after).
+                    # the next choice (a skip: it does not count toward stuck_after).
                     return self.skip_field(shown, page, selected)
                 declared = self.current_values().get(decision.get("value"))
                 if declared:
@@ -662,9 +662,10 @@ class Agent:
             raise ValueError("Unknown command")
         return self.snapshot()
 
-    def refuse(self, shown, page, selected, reason, pointer_moved=False):
+    def refuse(self, shown, page, selected, reason, pointer_moved=False, skipped=False):
         """Record an action that was not executed and tell the model about it. True when stuck_after refusals in a row
-        (with nothing executed between) say the run should stop."""
+        (with nothing executed between) say the run should stop. A skipped field (NONE) is hidden like a refusal but
+        does not count: it cannot repeat on the same page and max_model_calls bounds the loop."""
         state = self.state
         refused = state.setdefault("refused", [])
         del refused[:-49]
@@ -678,13 +679,13 @@ class Agent:
                 "choice": selected,
                 "after": len(state["history"]),
                 "pointer_moved": pointer_moved,
+                "skipped": skipped,
             }
         )
-        return sum(r["after"] == len(state["history"]) for r in refused) >= self.stuck_after
+        return sum(r["after"] == len(state["history"]) and not r["skipped"] for r in refused) >= self.stuck_after
 
     def skip_field(self, shown, page, selected):
-        if self.refuse(shown, page, selected, "no declared value fits this field; nothing typed"):
-            return self.stop("blocked", "refused")
+        self.refuse(shown, page, selected, "no declared value fits this field; nothing typed", skipped=True)
         self.state["status"] = "ready"
         self.state["elapsed_ms"] = self.now_ms()
         return self.snapshot()

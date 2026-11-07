@@ -345,7 +345,7 @@ def test_check_callables_return_a_bool_or_a_bool_with_a_reason(monkeypatch, resu
         max_rejections=9,
     )
     do(agent)
-    assert seen and isinstance(seen[0], expect.Facade) and seen[0].unwrap() is agent.browser
+    assert seen and isinstance(seen[0], expect.Facade) and seen[0]._unwrap() is agent.browser
     assert agent.state["steps"][0]["checks"][0]["met"] is met
     if isinstance(result, tuple):
         assert agent.state["steps"][0]["checks"][0]["reason"] == result[1]
@@ -851,7 +851,7 @@ def test_a_check_callable_gets_a_read_only_facade_not_the_browser(monkeypatch):
     agent.fake.browser.evaluate.return_value = "https://example.test/now"
     do(agent)
     facade = got[0]
-    assert sorted(n for n in dir(facade) if not n.startswith("_") and n != "unwrap") == [
+    assert sorted(n for n in dir(facade) if not n.startswith("_")) == [
         "element", "evaluate", "probe", "text", "url"
     ]
     assert facade.url() == "https://example.test/now"
@@ -962,8 +962,27 @@ def test_choosing_none_types_nothing_and_hides_that_field_until_the_page_changes
     )
     agent.command("predict")
     assert [a["id"] for a in seen["page"]["actions"]] == ["e3", "wait"] and seen["refused"][0]["kind"] == "fill"
-    # A second refusal on the same page ends the run, as for a refused press.
-    again = agent.state["decision"] = decision("e1", "TYPE_TEXT", "NONE")
-    assert again
-    final = agent.command("act", {"fingerprint": agent.state["page"]["fingerprint"]})
-    assert final["status"] == "blocked" and final["stop_reason"] == "refused"
+    # A skipped field is hidden and bounded by max_model_calls, so it never counts toward stuck_after.
+    agent.state["decision"] = decision("e1", "TYPE_TEXT", "NONE")
+    again = agent.command("act", {"fingerprint": agent.state["page"]["fingerprint"]})
+    assert again["status"] == "ready" and again["stop_reason"] is None
+
+
+def test_none_skips_do_not_count_toward_stuck_after(monkeypatch):
+    fields = [
+        {"id": f"e{i}", "kind": "fill", "label": f"Optional {i}", "role": "textbox", "value": "", "node": i}
+        for i in (1, 2, 3)
+    ]
+    submit = {"id": "e4", "kind": "click", "label": "Submit", "role": "button", "value": "", "node": 4}
+    state = page()
+    state["actions"] = [*fields, submit, {"id": "wait", "kind": "wait", "label": "Wait"}]
+    state["guards"] = {str(i): ["g", ""] for i in (1, 2, 3, 4)}
+    state["fingerprint"] = fingerprint(state)
+    agent = make(monkeypatch, "fill what fits", observed=state, values={"term": "cats"}, stuck_after=3)
+    for field in fields:
+        snapshot = do(agent, field["id"], "TYPE_TEXT", value="NONE")
+        assert snapshot["status"] == "ready" and snapshot["stop_reason"] is None
+    assert len(agent.state["refused"]) == 3
+    final = do(agent, "e4", "CLICK")
+    agent.fake.browser.act.assert_called_once()
+    assert final["status"] != "blocked" and final["history"][-1]["action"] == "Submit"
