@@ -1,15 +1,16 @@
 """The complete agent loop. Typed choices, observable state, bounded execution."""
 
 import base64
-import contextlib
 import copy
 import functools
 import re
 import time
+import warnings
 from pathlib import Path
 
 from . import replay as recorded
 from .browser import (
+    MAX_READ_TIMEOUTS,
     Browser,
     MutationTimeout,
     ReadTimeout,
@@ -170,6 +171,9 @@ class Agent:
     take the viewport from the recorded trace: the caller sets it (the trace records the one it ran with), so replay at
     the recorded size by passing the same value.
     """
+    read_timeouts = 0  # Consecutive ticks that ended on a ReadTimeout (see look_again).
+    timed_out = False
+    close_error = None
 
     # What an Agent built without __init__ (a test double) means: one unchecked step, no values.
     steps, values, secrets, _raw = (), {}, (), None
@@ -752,11 +756,29 @@ class Agent:
     def command(self, name, body=None):
         if name != "tick":
             return self.run_command(name, body)
+        self.timed_out = False
         try:
-            return self.run_command(name, body)
+            result = self.run_command(name, body)
         except ReadTimeout:
             # The page would not answer even to the look-again of a stale tick: end the run, never raise.
             return self.stop("failed", "read_timeout")
+        if not self.timed_out:
+            self.read_timeouts = 0  # A tick that got an answer (an action, or an observation that was fresh).
+        return result
+
+    def look_again(self, error):
+        """The stale handler of a tick. Consecutive ReadTimeouts (a resolve or a focus read that never answers while
+        observe still does) are counted here, because nothing else bounds them: past MAX_READ_TIMEOUTS the run ends."""
+        state = self.state
+        state["decision"], state["status"] = None, "ready"
+        if isinstance(error, ReadTimeout):
+            self.timed_out = True
+            self.read_timeouts += 1
+            if self.read_timeouts > MAX_READ_TIMEOUTS:
+                return self.stop("failed", "read_timeout")
+        state["page"] = self.observe()
+        state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
+        return self.snapshot()
 
     def run_command(self, name, body=None):
         body = body or {}
@@ -765,23 +787,16 @@ class Agent:
             if self.replaying():
                 try:
                     return self.replay_tick()
-                except StalePage:
+                except StalePage as error:
                     # The observation itself went stale (a navigation that is slow to settle): look again.
-                    state["decision"], state["status"] = None, "ready"
-                    state["page"] = self.observe()
-                    state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
-                    return self.snapshot()
+                    return self.look_again(error)
             try:
                 self.command("predict", {})
                 if state["status"] in TERMINAL:
                     return self.snapshot()
                 return self.command("act", {"fingerprint": state["page"]["fingerprint"]})
-            except StalePage:
-                state["decision"] = None
-                state["status"] = "ready"
-                state["page"] = self.observe()
-                state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
-                return self.snapshot()
+            except StalePage as error:
+                return self.look_again(error)
         elif name == "predict":
             if not state["browser"]:
                 raise ValueError("Start a demo first")
@@ -1231,5 +1246,13 @@ class Agent:
         if exc_type is None:
             self.close()
         else:
-            with contextlib.suppress(Exception):
-                self.close()  # A teardown error must not hide the exception that is already leaving the block.
+            try:
+                self.close()
+            except Exception as error:
+                # A teardown error must not hide the exception that is already leaving the block, but it is recorded.
+                self.close_error = f"{type(error).__name__}: {error}"
+                if isinstance(getattr(self, "state", None), dict):
+                    self.state["close_error"] = self.close_error
+                warnings.warn(
+                    f"Agent.close() failed while another error was leaving the block: {error!r}", stacklevel=2
+                )

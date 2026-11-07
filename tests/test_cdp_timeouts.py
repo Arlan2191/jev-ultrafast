@@ -227,7 +227,7 @@ def test_a_failed_close_does_not_mask_the_exception_that_ended_the_block(monkeyp
     agent = Agent.__new__(Agent)
     agent.evidence = None
     agent.browser = Mock(close=Mock(side_effect=browser_module.ReadTimeout("Target.closeTarget timed out")))
-    with pytest.raises(KeyError, match="original"), agent:
+    with pytest.warns(UserWarning), pytest.raises(KeyError, match="original"), agent:
         raise KeyError("original")
     agent.browser.close.assert_called_once()
     with pytest.raises(browser_module.ReadTimeout), agent:  # With nothing else going on, the error is reported.
@@ -283,3 +283,14 @@ def test_a_click_locate_that_times_out_is_a_stale_read_and_nothing_was_pressed(m
     with pytest.raises(browser_module.ReadTimeout):
         browser_operation(request)
     assert "Input.dispatchMouseEvent" not in calls
+
+
+def test_a_close_failure_hidden_behind_a_body_exception_is_recorded_and_warned_about():
+    agent = Agent.__new__(Agent)
+    agent.evidence = None
+    agent.state = {}
+    agent.browser = Mock(close=Mock(side_effect=browser_module.ReadTimeout("Target.closeTarget timed out")))
+    with pytest.warns(UserWarning, match="close\\(\\) failed"), pytest.raises(KeyError, match="original"), agent:
+        raise KeyError("original")
+    assert agent.close_error == "ReadTimeout: Target.closeTarget timed out"
+    assert agent.state["close_error"] == agent.close_error

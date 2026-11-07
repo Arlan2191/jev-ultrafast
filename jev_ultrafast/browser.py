@@ -619,6 +619,8 @@ class Browser:
 
     def close(self):
         if self.target:
+            # Cleared before the call and never retried, by design: a close that timed out may hang again, and a
+            # second close() must not send closeTarget twice.
             target, self.target = self.target, None
             self.call("Target.closeTarget", session=None, targetId=target)
 

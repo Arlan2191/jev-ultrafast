@@ -1319,6 +1319,49 @@ def test_a_read_timeout_when_resolving_in_a_replay_looks_again_instead_of_diverg
     assert final["status"] == "done" and journey.asked == [] and final["replay"]["steps_healed"] == 0
 
 
+@pytest.mark.parametrize("heal", [False, True])
+def test_a_resolve_that_always_times_out_ends_a_replay_in_a_bounded_number_of_ticks(journey, heal):
+    trace = journey.record()
+    journey.browser.resolve.side_effect = ReadTimeout("Runtime.evaluate timed out")
+    _agent, final = journey.replay(trace, heal=heal)
+    assert final["status"] == "failed" and final["stop_reason"] == "read_timeout"
+    assert journey.executed == [] and journey.asked == []
+    assert journey.browser.resolve.call_count == 3
+
+
+@pytest.mark.parametrize("heal", [False, True])
+def test_a_focus_read_that_always_times_out_ends_a_replay_too(journey, heal, monkeypatch):
+    trace = journey.record()
+    reads = []
+
+    def focus_node(_self, _planned):
+        reads.append(1)
+        raise ReadTimeout("Runtime.evaluate timed out")
+
+    # A recorded key step reads the focused element through focus_node; the journey has none, so the first
+    # replayed action stands in for it.
+    monkeypatch.setattr(Agent, "replay_decision", lambda self, planned: focus_node(self, planned))
+    _agent, final = journey.replay(trace, heal=heal)
+    assert final["status"] == "failed" and final["stop_reason"] == "read_timeout"
+    assert len(reads) == 3 and journey.executed == []
+
+
+def test_a_single_read_timeout_still_recovers_and_the_count_starts_over(journey):
+    trace = journey.record()
+    original = journey.resolve
+    calls = []
+
+    def resolve(locator, node=False):
+        calls.append(1)
+        if len(calls) % 2:
+            raise ReadTimeout("Runtime.evaluate timed out")
+        return original(locator, node)
+
+    journey.browser.resolve.side_effect = resolve
+    _agent, final = journey.replay(trace, heal=False)
+    assert final["status"] == "done" and journey.asked == []
+
+
 def test_a_read_timeout_when_resolving_a_key_focus_is_not_a_missing_focus():
     agent = Agent.__new__(Agent)
     agent.browser = Mock(resolve=Mock(side_effect=ReadTimeout("Runtime.evaluate timed out")))
