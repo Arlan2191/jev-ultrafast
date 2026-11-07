@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Locators</title></head>
+<body>
+<main>
+  <h1>Locators</h1>
+  <button>Delete</button>
+  <dialog open aria-label="Confirm delete">
+    <p>Remove this item?</p>
+    <button>Delete</button>
+    <button>Cancel</button>
+  </dialog>
+  <ul>
+    <li><span>Alpha</span> <a href="/items/1?tab=info" onclick="return false">Open</a></li>
+    <li><span>Beta</span> <a href="/items/2?tab=info" onclick="return false">Open</a></li>
+  </ul>
+  <form aria-label="Contact">
+    <label for="email">Email address</label>
+    <input id="email" type="text" placeholder="you@example.test">
+  </form>
+  <button data-testid="save-button">Save</button>
+  <button id=":r1:">Generated</button>
+  <p id="status">idle</p>
+</main>
+<script>
+  document.addEventListener('click', event => {
+    document.getElementById('status').textContent = 'clicked ' + (event.target.textContent || '').trim();
+  });
+</script>
+</body>
+</html>
