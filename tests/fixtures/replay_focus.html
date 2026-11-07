@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Focus</title></head>
+<body>
+<form onsubmit="event.preventDefault(); document.getElementById('out').textContent = 'Submitted'">
+  <input type="text" aria-label="Query" value="a book">
+  <button type="button" onclick="window.__deleted += 1">Delete</button>
+</form>
+<p id="out"></p>
+<script>
+  // Enter submits the query from the field, and deletes when the Delete button has focus instead (?variant=moved).
+  window.__deleted = 0;
+  const moved = new URLSearchParams(location.search).get("variant") === "moved";
+  (moved ? document.querySelector("button") : document.querySelector("input")).focus();
+</script>
+</body>
+</html>

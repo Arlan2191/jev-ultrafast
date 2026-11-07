@@ -7,16 +7,17 @@ import re
 import time
 from pathlib import Path
 
+from . import replay as recorded
 from .browser import Browser, Refused, StalePage, content_fingerprint, fingerprint
-from .evidence import DROPPED_PART, MODES, URL_MODES, Evidence, library_version
+from .evidence import DROPPED_PART, MODES, URL_MODES, Evidence, library_version, redact_url
 from .keys import validate_keys, validate_urls
 from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS, NONE
 from .steps import parse_goals, redaction, secret_forms, validate_values
 from .trace import SCHEMA
-from .waits import DEFAULT_VIEWPORT, MAX_WAITS, attribute_names, ignore_patterns, viewport_size
+from .waits import DEFAULT_VIEWPORT, MAX_WAITS, attribute_names, ignore_patterns, needs_settle, viewport_size
 
-TERMINAL = {"done", "blocked", "denied", "budget", "failed"}
+TERMINAL = {"done", "blocked", "denied", "budget", "failed", "diverged"}
 LOCATED = {"click", "fill", "select", "hover"}  # Action kinds that target an element, so get a locator.
 # Dropped from the copy of a page that the model and the state see when a secret value is declared: the marker and the
 # element guards hold raw field values, and only the browser needs them (it keeps the raw page).
@@ -101,6 +102,19 @@ class Agent:
     wait_ignore_attributes: attribute names (for example ("style",)) whose changes are not DOM activity.
     wait_interactive_grace_ms: how long a document may stay "interactive" before it counts as loaded.
     A WAIT goes through before_action like any action.
+    replay: the evidence_dir/trace.jsonl path (or the loaded events, jev_ultrafast.trace.load_trace) of an earlier run
+    that ended done and verified, for the SAME goals, checks and value names (otherwise ValueError). The run then asks
+    no model: for each step it re-resolves every recorded element by its locator, runs the matching action through
+    the usual path (freshness, before_action, settle, history, evidence; source "replay") and moves on when the step's
+    checks hold. When a step diverges (the locator no longer resolves to one element, the control is no longer
+    offered, a press is refused or stale twice in a row, the recorded actions are spent while the checks do not
+    hold or do not stay held, a goto URL, scroll distance, page or key focus differs from the recorded one) heal=True
+    (default) hands the rest of that step to the normal model loop and resumes replay at the next step; heal=False
+    ends the run as "diverged" with stop_reason "<cause> at step N". A before_action veto still ends the run as
+    "denied". state["replay"] counts steps_replayed, steps_healed, actions_replayed and model_calls.
+    replay_quiet_ms: replay only: the quiet window stable() waits before re-reading the checks when the page-side
+    tracker shows nothing pending (default 150; None always keeps the full 500 ms, which also catches rollbacks the
+    tracker cannot see: WebSocket, SSE, postMessage, setInterval, ignore_urls endpoints). A model run ignores it.
     goals: a string, or a list of strings and Step(goal, expect=(), values=None). Each item is one step; the model
     sees only the current step's goal, the goals already completed and the current step's check descriptions.
     Checks (jev_ultrafast.expect) are evaluated in code. A DONE choice on a step with checks is accepted only when
@@ -130,7 +144,9 @@ class Agent:
     has not been tested, and a new window there is a visible one.
     viewport: (width, height) of the owned tab in CSS pixels, default (1120, 780), at most 7680x4320. Responsive pages
     change layout with it, so set it to match the other drivers or the screens you care about; it is recorded in the
-    run_start event of the evidence.
+    run_start event of the evidence. A replay does not
+    take the viewport from the recorded trace: the caller sets it (the trace records the one it ran with), so replay at
+    the recorded size by passing the same value.
     """
 
     # What an Agent built without __init__ (a test double) means: one unchecked step, no values.
@@ -138,6 +154,7 @@ class Agent:
     evidence, locators, evidence_urls = None, False, "redacted"
     expect_timeout_ms, max_rejections, auto_complete = 5000, 3, True
     viewport = DEFAULT_VIEWPORT
+    replay = None
 
     def __init__(
         self,
@@ -175,6 +192,9 @@ class Agent:
         require_expectations=False,
         values=None,
         viewport=DEFAULT_VIEWPORT,
+        replay=None,
+        heal=True,
+        replay_quiet_ms=150,
     ):
         self.viewport = viewport = viewport_size(viewport)
         steps = parse_goals(goals)
@@ -188,6 +208,11 @@ class Agent:
                 if not step.expect:
                     raise ValueError(f"Step {number} has no expect checks (require_expectations=True)")
         values = validate_values(values)
+        if type(heal) is not bool:
+            raise ValueError("heal must be True or False")
+        positive_int("replay_quiet_ms", replay_quiet_ms, optional=True, minimum=0)
+        self.replay_quiet_ms = replay_quiet_ms
+        self.replay = recorded.Replay(replay, steps, values, heal) if replay is not None else None
         secrets = {
             form: name
             for source in (values, *(s.values for s in steps))
@@ -288,7 +313,7 @@ class Agent:
             wait_interactive_grace_ms=wait_interactive_grace_ms, expect_timeout_ms=expect_timeout_ms,
             max_rejections=max_rejections, auto_complete=auto_complete, require_expectations=require_expectations,
             before_action=before_action is not None, locators=self.locators, evidence_urls=evidence_urls,
-            evidence_capture=evidence_capture, viewport=list(viewport),
+            evidence_capture=evidence_capture, viewport=list(viewport), replay=replay is not None, heal=heal,
             screenshots=self.evidence.mode if self.evidence else None,
         )
         try:
@@ -336,6 +361,7 @@ class Agent:
             elapsed_ms=0,
             started_at=None,
             record=bool(self.record_dir),
+            **({"replay": self.replay.counts()} if self.replay else {}),
         )
         if self.record_dir:
             self.record_dir.mkdir(parents=True, exist_ok=True)
@@ -344,6 +370,8 @@ class Agent:
 
     def snapshot(self):
         self.sync_step()
+        if self.replay:
+            self.state["replay"] = self.replay.counts(self.state, self.model_calls())
         if self.evidence and self.state["status"] in TERMINAL:
             self.end_evidence()
         return {
@@ -399,6 +427,7 @@ class Agent:
             ],
             values=names,
             config=self.config,
+            replay=self.replay.describe() if self.replay else None,
             capture=self.evidence.capture,
         )
 
@@ -445,6 +474,8 @@ class Agent:
                 "tokens": usage,
                 "wall_ms": state["elapsed_ms"],
                 "locator_missing": missing,
+                "replay_actions": sum(h.get("source") == "replay" for h in state["history"]),
+                "healed_steps": len(self.replay.causes) if self.replay else 0,
             },
             dropped=evidence.dropped(),
             dropped_part=DROPPED_PART,
@@ -468,6 +499,18 @@ class Agent:
         if found and found.get("error"):
             return None, found["error"]
         return (self.clean(found), None) if found else (None, "ElementGone")
+
+    def locate_focus(self, page):
+        """The locator of the element that has focus, for a key press (None when nothing has focus, locators are off
+        or the element cannot be found again)."""
+        node = (page.get("focus") or {}).get("node")
+        if not self.locators or type(node) is not int:
+            return None
+        try:
+            found = self.browser.locator(node, full_urls=self.evidence_urls == "full")
+        except Exception:
+            return None
+        return self.clean(found) if found and not found.get("error") else None
 
     def raw_page(self):
         raw = self._raw
@@ -516,7 +559,13 @@ class Agent:
         if record and record["status"] == "active":
             self.sync_step()
             record.update(status=status, ended_ms=self.now_ms(), verified=verified)
-            self.trace("step", index=self.state["steps"].index(record), status=status, verified=verified)
+            index = self.state["steps"].index(record)
+            if self.replay and index in self.replay.causes and self.replay.healing == index:
+                self.trace(
+                    "heal", step=index, cause=self.replay.causes[index], healed=True, outcome=status,
+                    model_calls=record["model_calls"],
+                )
+            self.trace("step", index=index, status=status, verified=verified)
 
     def finish_run(self):
         state = self.state
@@ -566,8 +615,28 @@ class Agent:
         """The checks held once. A page that applies a press optimistically and takes it back (a server that refused)
         holds them for an instant, so wait for the page to settle and read every check again."""
         if self.expect_timeout_ms:
-            self.state["browser"].settled(timeout_ms=self.expect_timeout_ms)
+            browser = self.state["browser"]
+            quiet = {"quiet_ms": self.replay_quiet_ms} if self.quiet_replay() else {}
+            browser.settled(timeout_ms=self.expect_timeout_ms, **quiet)
         return self.run_checks(True, everything=True, again=True)
+
+    def quiet_replay(self):
+        """Replay only: the fixed quiet window of stable() exists to catch an optimistic UI that a server takes back,
+        which needs a counted request or a short timer. With the post-action settle on (it waited for any that the
+        action started), none pending or started since, and no check that could change the page by being read, the
+        shorter post-action window is enough. The double read stays."""
+        step, _record = self.current_step()
+        browser = self.state["browser"]
+        if self.replay_quiet_ms is None or not self.replaying() or not step or not all(e.cheap for e in step.expect):
+            return False
+        if not browser.action_settle_timeout_ms:
+            return False  # The caller turned the post-action wait off: this window is the only guard left.
+        try:
+            activity = browser.activity()
+        except Exception:
+            return False
+        # None: the page is navigating or too busy to answer. That is exactly when it cannot vouch for itself.
+        return activity is not None and not needs_settle(activity)
 
     def reject(self, unmet):
         """Record a DONE that did not hold (also a step that completed by itself but did not stay complete). Returns
@@ -640,6 +709,15 @@ class Agent:
         body = body or {}
         state = self.state
         if name == "tick":
+            if self.replaying():
+                try:
+                    return self.replay_tick()
+                except StalePage:
+                    # The observation itself went stale (a navigation that is slow to settle): look again.
+                    state["decision"], state["status"] = None, "ready"
+                    state["page"] = self.observe()
+                    state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
+                    return self.snapshot()
             try:
                 self.command("predict", {})
                 if state["status"] in TERMINAL:
@@ -756,7 +834,10 @@ class Agent:
                     # the next choice (a skip: it does not count toward stuck_after).
                     return self.skip_field(shown, page, selected)
                 declared = self.current_values().get(decision.get("value"))
-                if declared:
+                if decision.get("text") is not None:
+                    # A replayed generated text: exactly what the recorded run typed, with no text-model call.
+                    text, source = decision["text"], "generated"
+                elif declared:
                     # A caller-provided value: no text-model call, and a secret stays out of everything recorded.
                     text, value_name = declared.text, decision["value"]
                     source = f"value:{value_name}"
@@ -788,6 +869,7 @@ class Agent:
                     self.end_step("blocked")
                     return self.stop("denied")
             locator, locator_error = self.locate(action)
+            focus_locator = self.locate_focus(page) if shown["kind"] == "key" else None
             # Browser.act checks freshness immediately before input, including after text generation.
             try:
                 outcome = state["browser"].act(action, raw, text=text)
@@ -811,6 +893,7 @@ class Agent:
                     "latency_ms": decision["latency_ms"],
                     "text": recorded,
                     **({"text_source": source, "value_name": value_name} if source else {}),
+                    "source": decision.get("source", "model"),
                     "text_helper": helper["model"] if helper else None,
                     "text_latency_ms": helper["latency_ms"] if helper else 0,
                     "operation": decision["operation"],
@@ -830,6 +913,11 @@ class Agent:
                 self.trace(
                     "action",
                     index=len(state["history"]),
+                    step=state["plan_index"],
+                    source=decision.get("source", "model"),
+                    name=shown.get("name"),
+                    option=shown.get("value") if shown["kind"] == "select" else None,
+                    delta=shown.get("delta"),
                     kind=shown["kind"],
                     label=shown["label"],
                     choice=selected,
@@ -840,6 +928,9 @@ class Agent:
                     text=recorded,
                     value_name=value_name,
                     key=shown.get("key"),
+                    focus=shown.get("focused") if shown["kind"] == "key" else None,
+                    **({"focus_locator": focus_locator} if shown["kind"] == "key" else {}),
+                    page_url=redact_url(page["url"]),
                     url=shown.get("url"),
                     result=outcome if isinstance(outcome, dict) else None,
                 )
@@ -857,9 +948,12 @@ class Agent:
                     base64.b64decode(state["page"]["screenshot"])
                 )
             repeated = state["history"][-self.stuck_after :]
+            # A replayed action is not a loop risk: the recorded run passed this rule, the plan is finite, and a page
+            # that stopped reacting is a divergence for replay_tick to heal, not a reason to stop.
             state["status"] = (
                 "blocked"
-                if len(repeated) == self.stuck_after
+                if decision.get("source") != "replay"
+                and len(repeated) == self.stuck_after
                 and all(
                     h["content_changed"] is False and (h["kind"] != "wait" or h.get("met") is False)
                     for h in repeated
@@ -879,6 +973,9 @@ class Agent:
                 unmet = self.stable()
                 if not unmet:
                     self.complete_step()
+                elif decision.get("source") == "replay":
+                    # Held once and not twice (an optimistic rollback): for the model loop to look at, not a reject.
+                    self.diverge(state["plan_index"], "checks_unstable")
                 elif not self.reject(unmet) and state["status"] == "blocked":
                     self.end_step("blocked")
             elif state["status"] == "blocked":
@@ -886,6 +983,116 @@ class Agent:
         else:
             raise ValueError("Unknown command")
         return self.snapshot()
+
+    # Replay (see jev_ultrafast.replay). A replayed action is an ordinary decision that costs no model call.
+
+    def replaying(self):
+        run = self.replay
+        index = self.state.get("plan_index", 0)
+        return bool(run) and index < len(self.steps) and run.healing != index
+
+    def replay_decision(self, planned):
+        """(decision, None) for the next recorded action on the page as it is now, or (None, why it cannot run)."""
+        actions = self.state["page"]["actions"]
+        if planned.kind in recorded.ELEMENT:
+            if not planned.locator:
+                return None, "locator_missing"
+            if cause := recorded.page_cause(planned, self.state["page"]["url"]):
+                return None, cause
+            try:
+                found = self.browser.resolve(planned.locator, node=True)
+            except Exception:
+                return None, "resolve_failed"
+            cause = recorded.unresolved(found)
+            action, cause = (None, cause) if cause else recorded.element_action(planned, actions, found["node"])
+        else:
+            page_ = self.state["page"]
+            action, cause = recorded.control_action(
+                planned, actions, page_.get("focus"), self.focus_node(planned), page_["url"]
+            )
+        if cause:
+            return None, cause
+        decision = {
+            "choice": action["id"], "operation": planned.operation, "target": None, "confidence": 1.0,
+            "probabilities": {action["id"]: 1.0}, "latency_ms": 0, "usage": {}, "source": "replay",
+        }
+        if planned.kind == "fill":
+            extra, cause = recorded.fill_text(planned, self.current_values())
+            if cause:
+                return None, cause
+            decision |= extra
+        return decision, None
+
+    def focus_node(self, planned):
+        """The node the locator of a recorded key's focused element resolves to now, or None (like a click's locator:
+        unique, verified and observed, else nothing)."""
+        if planned.kind != "key" or not planned.focus_locator:
+            return None
+        try:
+            found = self.browser.resolve(planned.focus_locator, node=True)
+        except Exception:
+            return None
+        return None if recorded.unresolved(found) else found["node"]
+
+    def replay_tick(self):
+        state, run = self.state, self.replay
+        if state["started_at"] is None:
+            state["started_at"] = time.perf_counter()
+        if state["status"] in TERMINAL:
+            raise ValueError("This run has stopped. Start a fresh demo.")
+        if not self.browser.fresh(self.raw_page()):
+            state["page"] = self.observe()
+        state["decision"] = None
+        step, record = self.current_step()
+        if record["started_ms"] is None:
+            record["started_ms"] = self.now_ms()
+        index = state["plan_index"]
+        if run.cursor[0] != index:
+            run.cursor, run.failures = [index, 0], 0
+        queue = run.plan[index]
+        if run.cursor[1] >= len(queue):
+            unmet = self.run_checks(once=False) if step.expect else []
+            if step.expect and not unmet:
+                unmet = self.stable()
+            if unmet:
+                return self.diverge(index, "checks_unmet")
+            self.complete_step()
+            return self.snapshot()
+        decision, cause = self.replay_decision(queue[run.cursor[1]])
+        if cause:
+            return self.diverge(index, cause)
+        state["decision"], state["status"] = decision, "predicted"
+        executed = len(state["history"])
+        try:
+            self.command("act", {"fingerprint": state["page"]["fingerprint"]})
+        except StalePage as error:
+            state["decision"], state["status"] = None, "ready"
+            if len(state["history"]) > executed:
+                # It ran, and only the observation after it went stale. Decide by what happened, never by the
+                # exception: the action is done, the cursor moves on and the next tick looks at the page again.
+                run.failures = 0
+                run.cursor[1] += 1
+                return self.snapshot()
+            # Nothing was executed (a refusal or a stale page is raised before input): look again, once.
+            run.failures += 1
+            if run.failures >= 2:
+                return self.diverge(index, ("refused" if isinstance(error, Refused) else "stale") + "_twice")
+            state["page"] = self.observe()
+            return self.snapshot()
+        run.failures = 0
+        if state["status"] not in TERMINAL:
+            run.cursor[1] += 1
+        return self.snapshot()
+
+    def diverge(self, index, cause):
+        """The recorded run no longer fits this page at step `index`: heal it with the model, or stop."""
+        state, run = self.state, self.replay
+        if self.replay.heal:
+            run.healing, run.causes[index] = index, cause
+            state["decision"], state["status"] = None, "ready"
+            return self.snapshot()
+        self.trace("heal", step=index, cause=cause, healed=False, outcome="diverged", model_calls=0)
+        return self.stop("diverged", f"{cause} at step {index + 1}")
 
     def refuse(self, shown, page, selected, reason, pointer_moved=False, skipped=False):
         """Record an action that was not executed and tell the model about it. True when stuck_after refusals in a row
