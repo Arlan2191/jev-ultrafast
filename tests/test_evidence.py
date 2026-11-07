@@ -1055,3 +1055,11 @@ def test_an_element_outside_the_document_is_a_counted_missing_locator(monkeypatc
     action = next(e for e in events if e["type"] == "action")
     assert (action["locator"], action["locator_error"]) == (None, "NotInDocument")
     assert events[-1]["totals"]["locator_missing"] == 1
+
+
+def test_the_viewport_reaches_the_browser_and_is_recorded_in_run_start(monkeypatch, tmp_path):
+    agent = make(monkeypatch, tmp_path, viewport=(1470, 920))
+    assert loop.Browser.call_args.kwargs["viewport"] == (1470, 920)
+    agent.close()
+    start = read(tmp_path / "run" / "trace.jsonl")[0]
+    assert start["viewport"] == {"width": 1470, "height": 920} and start["config"]["viewport"] == [1470, 920]

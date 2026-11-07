@@ -13,6 +13,7 @@ from browser_harness.helpers import cdp
 
 from .keys import key_events, offered_keys
 from .waits import (
+    DEFAULT_VIEWPORT,
     WaitResult,
     attribute_names,
     element_state,
@@ -21,6 +22,7 @@ from .waits import (
     non_negative,
     pattern,
     positive,
+    viewport_size,
 )
 
 # Accessible role, name and visibility: one implementation for the snapshot and the condition waits.
@@ -89,6 +91,7 @@ class Browser:
     ignore = []
     wait_ignore_attributes = ()
     tracker = TRACKER
+    viewport = DEFAULT_VIEWPORT
 
     def __init__(
         self,
@@ -111,7 +114,9 @@ class Browser:
         wait_ignore_attributes=(),
         wait_interactive_grace_ms=2000,
         on_target=None,
+        viewport=DEFAULT_VIEWPORT,
     ):
+        self.viewport = viewport_size(viewport)
         self.wait_quiet_ms = non_negative("wait_quiet_ms", wait_quiet_ms)
         self.wait_timeout_ms = positive("wait_timeout_ms", wait_timeout_ms)
         self.action_settle_timeout_ms = non_negative("action_settle_timeout_ms", action_settle_timeout_ms)
@@ -149,7 +154,10 @@ class Browser:
             self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
             if on_target:
                 on_target(self.target)  # Before the first navigation, so the first load is also seen.
-            self.call("Emulation.setDeviceMetricsOverride", width=1120, height=780, deviceScaleFactor=1, mobile=False)
+            width, height = self.viewport
+            self.call(
+                "Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=False
+            )
             # Keep rAF/menus rendering in an owned background tab, without activating the user's Chrome tab.
             self.call("Emulation.setFocusEmulationEnabled", enabled=True)
             # The tracker must exist before the page's own scripts run, so it sees their requests and timers.
@@ -328,6 +336,7 @@ class Browser:
                 "action": action,
                 "text": text,
                 "reveal_timeout_ms": self.reveal_timeout_ms,
+                "viewport": self.viewport,
             }
         )
         self.after_input = action
@@ -587,7 +596,12 @@ def browser_operation(request):
         action = request["action"]
         kind = action["kind"]
         if kind == "scroll":
-            call("Input.dispatchMouseEvent", type="mouseWheel", x=550, y=650, deltaX=0, deltaY=action["delta"])
+            # The wheel turns over the middle of the viewport, which is on screen at any size.
+            width, height = request.get("viewport") or DEFAULT_VIEWPORT
+            call(
+                "Input.dispatchMouseEvent", type="mouseWheel", x=width // 2, y=height // 2, deltaX=0,
+                deltaY=action["delta"],
+            )
         elif kind != "wait":
             if type(action["node"]) is not int:
                 raise ValueError("Invalid observed node")

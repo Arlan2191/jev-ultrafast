@@ -15,7 +15,7 @@ from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS, NONE
 from .steps import parse_goals, redaction, secret_forms, validate_values
 from .trace import SCHEMA
-from .waits import MAX_WAITS, attribute_names, ignore_patterns, needs_settle
+from .waits import DEFAULT_VIEWPORT, MAX_WAITS, attribute_names, ignore_patterns, needs_settle, viewport_size
 
 TERMINAL = {"done", "blocked", "denied", "budget", "failed", "diverged"}
 LOCATED = {"click", "fill", "select", "hover"}  # Action kinds that target an element, so get a locator.
@@ -142,12 +142,18 @@ class Agent:
     new_window: None (default) gives the owned tab a window of its own only in headless Chrome, where a background
     tab is throttled to about one frame per second after its first clicks; True or False force it. Headed Chrome
     has not been tested, and a new window there is a visible one.
+    viewport: (width, height) of the owned tab in CSS pixels, default (1120, 780), at most 7680x4320. Responsive pages
+    change layout with it, so set it to match the other drivers or the screens you care about; it is recorded in the
+    run_start event of the evidence. A replay does not
+    take the viewport from the recorded trace: the caller sets it (the trace records the one it ran with), so replay at
+    the recorded size by passing the same value.
     """
 
     # What an Agent built without __init__ (a test double) means: one unchecked step, no values.
     steps, values, secrets, _raw = (), {}, (), None
     evidence, locators, evidence_urls = None, False, "redacted"
     expect_timeout_ms, max_rejections, auto_complete = 5000, 3, True
+    viewport = DEFAULT_VIEWPORT
     replay = None
 
     def __init__(
@@ -185,10 +191,12 @@ class Agent:
         auto_complete=True,
         require_expectations=False,
         values=None,
+        viewport=DEFAULT_VIEWPORT,
         replay=None,
         heal=True,
         replay_quiet_ms=150,
     ):
+        self.viewport = viewport = viewport_size(viewport)
         steps = parse_goals(goals)
         positive_int("expect_timeout_ms", expect_timeout_ms, minimum=0)
         positive_int("max_rejections", max_rejections)
@@ -285,6 +293,7 @@ class Agent:
                 body_cap_ms=body_cap_ms,
                 wait_ignore_attributes=wait_ignore_attributes,
                 wait_interactive_grace_ms=wait_interactive_grace_ms,
+                viewport=viewport,
                 **({"on_target": self.evidence.attach} if self.evidence else {}),
             )
         except Exception:
@@ -304,7 +313,7 @@ class Agent:
             wait_interactive_grace_ms=wait_interactive_grace_ms, expect_timeout_ms=expect_timeout_ms,
             max_rejections=max_rejections, auto_complete=auto_complete, require_expectations=require_expectations,
             before_action=before_action is not None, locators=self.locators, evidence_urls=evidence_urls,
-            evidence_capture=evidence_capture, replay=replay is not None, heal=heal,
+            evidence_capture=evidence_capture, viewport=list(viewport), replay=replay is not None, heal=heal,
             screenshots=self.evidence.mode if self.evidence else None,
         )
         try:
@@ -410,7 +419,7 @@ class Agent:
             library_version=library_version(),
             url=url,
             browser={"product": version.get("product"), "user_agent": version.get("userAgent")},
-            viewport={"width": 1120, "height": 780},
+            viewport=dict(zip(("width", "height"), self.viewport)),
             steps=[
                 {"goal": step.goal, "checks": [e.description for e in step.expect], "values": {
                     name: v.secret for name, v in step.values.items()}}

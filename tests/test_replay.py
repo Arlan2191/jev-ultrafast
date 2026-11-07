@@ -1115,3 +1115,13 @@ def test_a_schema_1_click_is_not_bound_to_a_page(journey, tmp_path):
     journey.page_args = {"url": "https://example.test/elsewhere"}
     _agent, final = journey.replay(path, heal=False)
     assert final["status"] == "done"
+
+
+def test_replay_uses_the_callers_viewport_not_the_recorded_one(journey):
+    trace = journey.record()
+    recorded = load_trace(trace)[0]["viewport"]
+    agent, final = journey.replay(trace, viewport=(1470, 920))
+    assert final["status"] == "done" and agent.viewport == (1470, 920)
+    start = load_trace(journey.tmp_path / "replayed" / "trace.jsonl")[0]
+    assert recorded == {"width": 1120, "height": 780}
+    assert start["viewport"] == {"width": 1470, "height": 920}
