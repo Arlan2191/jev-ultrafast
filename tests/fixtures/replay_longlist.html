@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Long list</title></head>
+<body>
+<!-- No named container around the rows (plain divs), and a lot of text before them. -->
+<div id="clock"></div>
+<p id="prose"></p>
+<div id="list">
+  <div data-row="a">Row A <button type="button" onclick="del('a')">Delete</button></div>
+  <div data-row="b">Row B <button type="button" onclick="del('b')">Delete</button></div>
+  <div data-row="c">Row C <button type="button" onclick="del('c')">Delete</button></div>
+</div>
+<p id="out"></p>
+<script>
+  // Well over 4000 characters of text before the list. ?variant=swapped: rows a and b change places.
+  // ?variant=clock: a different time on every load, outside the list. ?variant=stamp: a different stamp inside a row.
+  const variant = new URLSearchParams(location.search).get("variant");
+  window.__clicked = [];
+  document.getElementById("prose").textContent = "Lorem ipsum dolor sit amet. ".repeat(220);
+  const list = document.getElementById("list");
+  if (variant === "swapped") list.firstElementChild.before(list.children[1]);
+  if (variant === "clock") document.getElementById("clock").textContent = "Now " + Math.random();
+  if (variant === "stamp") list.children[0].firstChild.textContent = "Row A " + Math.random() + " ";
+  function del(id) {
+    window.__clicked.push(id);
+    document.getElementById("out").textContent = "Deleted " + id;
+  }
+</script>
+</body>
+</html>

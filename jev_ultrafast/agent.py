@@ -184,6 +184,7 @@ class Agent:
         values=None,
         replay=None,
         heal=True,
+        replay_quiet_ms=150,
     ):
         steps = parse_goals(goals)
         positive_int("expect_timeout_ms", expect_timeout_ms, minimum=0)
@@ -198,6 +199,8 @@ class Agent:
         values = validate_values(values)
         if type(heal) is not bool:
             raise ValueError("heal must be True or False")
+        positive_int("replay_quiet_ms", replay_quiet_ms, optional=True, minimum=0)
+        self.replay_quiet_ms = replay_quiet_ms
         self.replay = recorded.Replay(replay, steps, values, heal) if replay is not None else None
         secrets = {
             form: name

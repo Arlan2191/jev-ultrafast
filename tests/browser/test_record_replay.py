@@ -78,6 +78,8 @@ def lab(open_page, fixture_base_url, monkeypatch, tmp_path):
             agent = Agent(f"{fixture_base_url}/{url}", goals or steps(), **kwargs)
             agents.append(agent)
             model.agent = agent
+            if chooser:
+                chooser.agent = agent
             for _ in agent.run():
                 pass
             wall = (time.perf_counter() - started) * 1000
@@ -289,3 +291,156 @@ def test_a_press_that_an_optimistic_page_takes_back_is_not_done_under_replay(lab
     assert stopped["status"] == "diverged" and stopped["verified"] is False
     assert stopped["stop_reason"] in {"checks_unstable at step 1", "checks_unmet at step 1"}
     assert again.browser.evaluate("document.querySelector('button').getAttribute('aria-pressed')") == "false"
+
+
+# --- fix round 2 ------------------------------------------------------------------------------------------------
+
+
+def pick_chooser(select):
+    """A model stub that answers with the action `select(agent_page_actions, browser)` names; forbid=True fails it."""
+
+    def chooser(page, goal, history, **extra):
+        chooser.calls.append(goal)
+        if chooser.forbid:
+            raise AssertionError("the model was asked during a replay")
+        choice = select(page, chooser)
+        return {
+            "choice": choice, "operation": chooser.operation, "target": "1", "confidence": 1.0,
+            "probabilities": {choice: 1.0}, "latency_ms": 1, "usage": {},
+        }
+
+    chooser.forbid, chooser.operation, chooser.agent = False, "CLICK", None
+    return chooser
+
+
+ROW_DELETE = "window.__jevFast.ids.get(document.querySelector('[data-row=b] button'))"
+
+
+def test_a_reordered_list_of_look_alikes_on_a_long_page_heals(lab):
+    goals = [Step("Delete row B", expect=expect.text("Deleted b"))]
+    chooser = pick_chooser(
+        lambda page, c: next(a["id"] for a in page["actions"] if a.get("node") == c.agent.browser.evaluate(ROW_DELETE))
+    )
+    agent, state, _model, _wall = lab.run(url="replay_longlist.html", goals=goals, chooser=chooser)
+    assert state["status"] == "done" and lab.clicked(agent) == ["b"]
+    agent.close()
+    chooser.forbid = False
+    again, healed, _model, _wall = lab.run(
+        url="replay_longlist.html?variant=swapped", goals=goals, chooser=chooser, replay=lab.trace(agent)
+    )
+    assert healed["status"] == "done" and healed["verified"] is True, healed["stop_reason"]
+    assert lab.clicked(again) == ["b"]  # Not "a", which now sits where "b" was.
+    again.close()
+    heal = next(e for e in load_trace(lab.trace(again)) if e["type"] == "heal")
+    assert heal["cause"] == "digest_changed" and heal["step"] == 0
+
+
+def test_a_clock_outside_the_list_does_not_make_the_step_heal(lab):
+    goals = [Step("Delete row B", expect=expect.text("Deleted b"))]
+    chooser = pick_chooser(
+        lambda page, c: next(a["id"] for a in page["actions"] if a.get("node") == c.agent.browser.evaluate(ROW_DELETE))
+    )
+    agent, state, _model, _wall = lab.run(url="replay_longlist.html?variant=clock", goals=goals, chooser=chooser)
+    assert state["status"] == "done"
+    agent.close()
+    chooser.forbid = True  # A different time on this load: still replayed, no model call.
+    again, replayed, _model, _wall = lab.run(
+        url="replay_longlist.html?variant=clock", goals=goals, chooser=chooser, replay=lab.trace(agent), heal=False
+    )
+    assert replayed["status"] == "done" and sources(replayed) == ["replay"], replayed["stop_reason"]
+    assert lab.clicked(again) == ["b"]
+
+
+def test_volatile_text_inside_the_rows_heals(lab):
+    goals = [Step("Delete row B", expect=expect.text("Deleted b"))]
+    chooser = pick_chooser(
+        lambda page, c: next(a["id"] for a in page["actions"] if a.get("node") == c.agent.browser.evaluate(ROW_DELETE))
+    )
+    agent, state, _model, _wall = lab.run(url="replay_longlist.html?variant=stamp", goals=goals, chooser=chooser)
+    assert state["status"] == "done"
+    agent.close()
+    again, healed, _model, _wall = lab.run(
+        url="replay_longlist.html?variant=stamp", goals=goals, chooser=chooser, replay=lab.trace(agent)
+    )
+    assert healed["status"] == "done" and lab.clicked(again) == ["b"]
+    again.close()
+    heal = next(e for e in load_trace(lab.trace(again)) if e["type"] == "heal")
+    assert heal["cause"] == "digest_changed"  # Safe direction: the model looks, the wrong row is never clicked.
+
+
+LINK_GOALS = [Step("Follow the first Read more", expect=expect.text("Opened /a/1"))]
+
+
+def enter_chooser():
+    chooser = pick_chooser(lambda page, c: next(a["id"] for a in page["actions"] if a["id"] == "key:Enter"))
+    chooser.operation = "PRESS_KEY"
+    return chooser
+
+
+def test_enter_on_another_look_alike_link_is_not_pressed(lab):
+    chooser = enter_chooser()
+    agent, state, _model, _wall = lab.run(url="replay_links.html", goals=LINK_GOALS, chooser=chooser)
+    assert state["status"] == "done" and agent.browser.evaluate("window.__opened") == ["/a/1"]
+    agent.close()
+    chooser.forbid = True
+    # Link 2 has focus: same role, label, tag and type, another href. Enter would open /a/2.
+    other, stopped, _model, _wall = lab.run(
+        url="replay_links.html?variant=second", goals=LINK_GOALS, chooser=chooser, replay=lab.trace(agent),
+        heal=False,
+    )
+    assert stopped["status"] == "diverged" and stopped["stop_reason"] == "focus_changed at step 1"
+    assert other.browser.evaluate("window.__opened") == [] and stopped["history"] == []
+
+
+def test_a_link_that_keeps_its_text_but_points_elsewhere_is_not_clicked(lab):
+    goals = [Step("Download the report", expect=expect.text("Opened /files/report.pdf"))]
+    chooser = pick_chooser(
+        lambda page, c: next(a["id"] for a in page["actions"] if a["kind"] == "click" and a["label"] == "Download")
+    )
+    agent, state, _model, _wall = lab.run(url="replay_links.html", goals=goals, chooser=chooser)
+    assert state["status"] == "done" and agent.browser.evaluate("window.__opened") == ["/files/report.pdf"]
+    agent.close()
+    chooser.forbid = True
+    moved, stopped, _model, _wall = lab.run(
+        url="replay_links.html?variant=moved", goals=goals, chooser=chooser, replay=lab.trace(agent), heal=False
+    )
+    assert stopped["status"] == "diverged" and stopped["history"] == []
+    assert moved.browser.evaluate("window.__opened") == []
+
+
+def test_a_reload_runs_only_on_the_page_it_was_recorded_on(lab):
+    goals = [Step("Reload the page", expect=expect.text("Page loaded"))]
+    chooser = pick_chooser(lambda page, c: "reload")
+    chooser.operation = "RELOAD"
+    agent, state, _model, _wall = lab.run(url="replay_page.html?page=1", goals=goals, chooser=chooser)
+    assert state["status"] == "done"
+    agent.close()
+    chooser.forbid = True
+    same, replayed, _model, _wall = lab.run(
+        url="replay_page.html?page=2", goals=goals, chooser=chooser, replay=lab.trace(agent), heal=False
+    )
+    assert replayed["status"] == "done" and sources(replayed) == ["replay"]
+    same.close()
+    other, stopped, _model, _wall = lab.run(
+        url="replay_page.html?section=2", goals=goals, chooser=chooser, replay=lab.trace(agent), heal=False
+    )
+    assert stopped["status"] == "diverged" and stopped["stop_reason"] == "page_changed at step 1"
+    assert stopped["history"] == []
+
+
+def test_a_rollback_from_a_setinterval_is_caught_by_the_full_window_only(lab):
+    goals = [Step("Upvote it", expect=expect.element(role="button", name="Upvote", state={"pressed": True}))]
+    chooser = pick_chooser(
+        lambda page, c: next(a["id"] for a in page["actions"] if a["kind"] == "click" and a["label"] == "Upvote")
+    )
+    agent, state, _model, _wall = lab.run(url="steps_toggle.html", goals=goals, chooser=chooser)
+    assert state["status"] == "done" and state["verified"]
+    agent.close()
+    chooser.forbid = True
+    # replay_quiet_ms=None keeps the whole 500 ms window, which sees the interval take the press back at 420 ms.
+    again, stopped, _model, _wall = lab.run(
+        url="steps_interval.html?revert=420", goals=goals, chooser=chooser, replay=lab.trace(agent), heal=False,
+        replay_quiet_ms=None,
+    )
+    assert stopped["status"] == "diverged" and stopped["verified"] is False
+    assert stopped["stop_reason"] in {"checks_unstable at step 1", "checks_unmet at step 1"}

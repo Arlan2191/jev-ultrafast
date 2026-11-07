@@ -16,15 +16,15 @@ NODES = {"Search": 10, "Go": 20, "Row B": 40, "Pin": 50}
 SECRET = "hunter2-correct-horse"
 
 
-FOCUS = {"role": "textbox", "label": "Search", "href": None, "tag": "input", "type": "text"}
+FOCUS = {"role": "textbox", "label": "Search", "href": None, "tag": "input", "type": "text", "node": 10}
 
 
-def page(focus=None, goto_url="https://example.test/", delta=560):
+def page(focus=None, goto_url="https://example.test/", delta=560, url="https://example.test/"):
     def click(node, label):
         return {"id": f"c{node}", "kind": "click", "label": label, "role": "button", "value": "", "node": node}
 
     state = {
-        "url": "https://example.test/",
+        "url": url,
         "title": "Search",
         "text": "Search",
         "scroll": {"y": 0},
@@ -37,6 +37,8 @@ def page(focus=None, goto_url="https://example.test/", delta=560):
             {"id": "scroll_down", "kind": "scroll", "label": "Scroll down", "delta": delta},
             {"id": "key:Enter", "kind": "key", "key": "Enter", "name": "Enter", "label": "Press Enter"},
             {"id": "goto:home", "kind": "goto", "name": "home", "url": goto_url, "label": "Open home"},
+            {"id": "back", "kind": "back", "label": "Go back to the previous page"},
+            {"id": "reload", "kind": "reload", "label": "Reload the current page"},
         ],
         "focus": focus,
         "marker": ["m"],
@@ -75,6 +77,7 @@ class Journey:
         self.browser.version = {"product": "HeadlessChrome/130", "userAgent": "UA"}
         self.browser.probe.side_effect = lambda kind, timeout_ms=0, **_a: WaitResult(True, 0, kind)
         by_node = {n: name for name, n in NODES.items()}
+        self.focus_resolves = None  # What the focus locator resolves to now: a node, or None for "nothing".
         self.browser.locator.side_effect = lambda node, full_urls=False: {
             "role": "button", "name": by_node[node], "tag": "button", "type": None,
         }
@@ -652,7 +655,7 @@ def as_schema_1(events):
         if event["type"] == "run_start":
             event["trace_schema"] = 1
         if event["type"] == "action":
-            for name in ("step", "source", "option", "delta", "focus"):
+            for name in ("step", "source", "option", "delta", "focus", "focus_locator", "page_url"):
                 event.pop(name, None)
         old.append(event)
     return old
@@ -731,14 +734,14 @@ def test_a_refusal_before_input_is_looked_at_again_and_executes_once(journey):
 # --- a key goes where it went ---------------------------------------------------------------------------------
 
 
-MOVED = {"role": "button", "label": "Delete", "href": None, "tag": "button", "type": None}
+MOVED = {"role": "button", "label": "Delete", "href": None, "tag": "button", "type": None, "node": 20}
 
 
 def test_a_recorded_key_is_pressed_only_on_the_element_that_had_focus(journey):
     journey.page_args = {"focus": FOCUS}
     trace = journey.record_controls(("key:Enter", "PRESS_KEY"))
     key = next(e for e in load_trace(trace) if e["type"] == "action" and e["kind"] == "key")
-    assert key["focus"] == FOCUS
+    assert key["focus"] == {k: v for k, v in FOCUS.items() if k != "node"}
 
     _agent, final = journey.replay(trace)
     assert final["status"] == "done" and journey.asked == [] and (None, "key", None) in journey.executed
@@ -886,3 +889,143 @@ def test_a_model_run_never_gets_the_short_window(journey):
     final = journey.run(journey.agent("model"))
     assert final["status"] == "done"
     assert all("quiet_ms" not in call.kwargs for call in journey.browser.settled.call_args_list)
+
+
+# --- fix round 2 ------------------------------------------------------------------------------------------------
+
+
+def test_a_changed_digest_is_its_own_cause():
+    from jev_ultrafast import replay
+
+    assert replay.unresolved({"rule": "ambiguous", "digest_changed": True}) == "digest_changed"
+    assert replay.unresolved({"rule": "ambiguous", "digest_changed": False}) == "ambiguous"
+    assert replay.unresolved({"rule": "ambiguous"}) == "ambiguous"
+
+
+LINK = {"role": "link", "label": "Read more", "href": "/a/1", "tag": "a", "type": None, "node": 10}
+
+
+def test_two_look_alike_focused_links_with_different_hrefs_are_not_the_same_focus():
+    from jev_ultrafast import replay
+
+    key = replay.Planned("key", "key:Enter", focus=LINK, focus_recorded=True, focus_locator={"name": "Read more"})
+    actions = [{"id": "key:Enter", "kind": "key"}]
+    assert replay.control_action(key, actions, LINK, focus_node=10)[1] is None
+    other = {**LINK, "href": "/a/2"}
+    assert replay.control_action(key, actions, other, focus_node=10) == (None, "focus_changed")
+    # The query VALUES are redacted in the trace and never compared; the keys are.
+    recorded = replay.Planned(
+        "key", "key:Enter", focus={**LINK, "href": "/a?id=<redacted>"}, focus_recorded=True, focus_locator={"x": 1}
+    )
+    assert replay.control_action(recorded, actions, {**LINK, "href": "/a?id=7"}, focus_node=10)[1] is None
+    assert replay.control_action(recorded, actions, {**LINK, "href": "/a?other=7"}, focus_node=10)[1] == "focus_changed"
+
+
+def test_a_focused_element_must_resolve_like_a_click_to_the_focused_node(journey):
+    journey.page_args = {"focus": FOCUS}
+    trace = journey.record_controls(("key:Enter", "PRESS_KEY"))
+    key = next(e for e in load_trace(trace) if e["type"] == "action" and e["kind"] == "key")
+    assert key["focus_locator"]["name"] == "Search"
+
+    journey.reset()
+    _agent, final = journey.replay(trace)
+    assert final["status"] == "done" and journey.asked == [] and (None, "key", None) in journey.executed
+
+    # Same role, label, tag and type, but the focused element is another node than the one the locator finds.
+    journey.reset()
+    journey.page_args = {"focus": {**FOCUS, "node": 99}}
+    _agent, final = journey.replay(trace, name="lookalike", heal=False)
+    assert final["status"] == "diverged" and final["stop_reason"] == "focus_changed at step 1"
+    assert journey.executed == []
+
+    # The locator no longer resolves at all (ambiguous or gone): the key is not pressed.
+    journey.reset()
+    journey.page_args = {"focus": FOCUS}
+    journey.resolves["Search"] = {"rule": "ambiguous", "unique": False, "count_match": True, "verified": False}
+    _agent, final = journey.replay(trace, name="unresolved", heal=False)
+    assert final["status"] == "diverged" and final["stop_reason"] == "focus_changed at step 1"
+    assert journey.executed == []
+
+
+def test_a_key_recorded_without_a_focus_locator_heals_when_something_has_focus(journey):
+    journey.page_args = {"focus": FOCUS}
+    events = load_trace(journey.record_controls(("key:Enter", "PRESS_KEY")))
+    for event in events:
+        if event["type"] == "action" and event["kind"] == "key":
+            event.pop("focus_locator", None)
+    _agent, final = journey.replay(events, heal=False)
+    assert final["status"] == "diverged" and final["stop_reason"] == "focus_changed at step 1"
+
+
+def test_unknown_activity_keeps_the_full_window(journey):
+    assert quiet_windows(journey, None) == [None, None, None]
+
+
+def test_the_replay_window_is_a_knob(journey):
+    assert quiet_windows(journey, QUIET, replay_quiet_ms=300) == [300, 300, 300]
+    assert quiet_windows(journey, QUIET, replay_quiet_ms=None) == [None, None, None]
+
+
+@pytest.mark.parametrize("bad", [-1, 1.5, "150", True])
+def test_the_replay_window_must_be_a_non_negative_integer_or_none(journey, bad):
+    with pytest.raises(ValueError, match="replay_quiet_ms"):
+        journey.agent("x", replay_quiet_ms=bad)
+
+
+PAGE_URL = "https://example.test/list?page=<redacted>"
+
+
+@pytest.mark.parametrize(
+    "kind, choice, operation",
+    [("scroll", "scroll_down", "SCROLL_DOWN"), ("back", "back", "BACK"), ("reload", "reload", "RELOAD"),
+     ("wait", "wait", "WAIT")],
+)
+def test_back_reload_scroll_and_wait_run_only_on_the_page_they_were_recorded_on(journey, kind, choice, operation):
+    journey.page_args = {"url": "https://example.test/list?page=1"}
+    trace = journey.record_controls((choice, operation))
+    action = next(e for e in load_trace(trace) if e["type"] == "action" and e["kind"] == kind)
+    assert action["page_url"] == PAGE_URL
+
+    journey.reset()
+    _agent, final = journey.replay(trace)
+    assert final["status"] == "done" and journey.asked == []
+    assert any(e[1] == kind for e in journey.executed)
+
+    journey.reset()
+    journey.page_args = {"url": "https://example.test/elsewhere"}
+    _agent, final = journey.replay(trace, name="elsewhere", heal=False)
+    assert final["status"] == "diverged" and final["stop_reason"] == "page_changed at step 1"
+    assert not [e for e in journey.executed if e[1] == kind]
+
+    journey.reset()  # A different query KEY is another page; a different query value is the same page.
+    journey.page_args = {"url": "https://example.test/list?page=2"}
+    _agent, final = journey.replay(trace, name="same-keys", heal=False)
+    assert final["status"] == "done"
+    journey.reset()
+    journey.page_args = {"url": "https://example.test/list?sort=2"}
+    _agent, final = journey.replay(trace, name="other-keys", heal=False)
+    assert final["stop_reason"] == "page_changed at step 1"
+
+
+def test_a_control_recorded_without_a_page_url_heals(journey):
+    journey.page_args = {"url": "https://example.test/list?page=1"}
+    events = load_trace(journey.record_controls(("scroll_down", "SCROLL_DOWN")))
+    for event in events:
+        if event["type"] == "action":
+            event.pop("page_url", None)
+    _agent, final = journey.replay(events, heal=False)
+    assert final["status"] == "diverged" and final["stop_reason"] == "page_changed at step 1"
+
+
+def test_the_plan_carries_the_page_url_and_the_focus_locator():
+    from jev_ultrafast import replay
+
+    base = {"type": "action", "t_ms": 1, "index": 1, "label": "x", "locator": None, "text_source": None, "text": None,
+            "result": None}
+    events = [
+        {"type": "step", "t_ms": 0, "index": 0, "status": "active"},
+        {**base, "kind": "key", "choice": "key:Enter", "focus": {"role": "link"}, "focus_locator": {"name": "x"},
+         "page_url": "https://example.test/a"},
+    ]
+    (key,) = replay.plan(events, 1)[0]
+    assert key.focus_locator == {"name": "x"} and key.page_url == "https://example.test/a"
