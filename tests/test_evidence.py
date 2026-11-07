@@ -98,6 +98,7 @@ def test_a_run_writes_a_trace_that_reads_back_and_ends_with_totals_that_match_th
     agent = make(monkeypatch, tmp_path, [Step("click go")], max_steps=5)
     agent.state["decisions"].append(decision())
     do(agent, "e3", "CLICK")
+    time.sleep(0.02)
     final = do(agent)
     agent.close()
     events = trace.load_trace(tmp_path / "run" / "trace.jsonl")
@@ -113,7 +114,7 @@ def test_a_run_writes_a_trace_that_reads_back_and_ends_with_totals_that_match_th
     assert end["totals"]["actions"] == len(final["history"]) == 1
     assert end["totals"]["jev_calls"] == len(final["decisions"]) and end["totals"]["text_calls"] == 0
     assert end["totals"]["tokens"]["jev"] == {"input_tokens": 100, "output_tokens": 5}
-    assert end["totals"]["wall_ms"] == final["elapsed_ms"]
+    assert end["totals"]["wall_ms"] == final["elapsed_ms"] > 0
     assert final["history"][0]["locator"] == LOCATOR
 
 
@@ -569,3 +570,24 @@ def test_closing_the_agent_stops_the_event_thread(monkeypatch, tmp_path):
     for name in ("console.jsonl", "network.jsonl", "network.har", "report.html", "trace.jsonl"):
         assert (tmp_path / "run" / name).exists()
     assert json.loads((tmp_path / "run" / "network.har").read_text())["log"]["version"] == "1.2"
+
+
+def test_actions_mode_does_not_shoot_an_observation_that_follows_no_action(monkeypatch, tmp_path):
+    agent = make(monkeypatch, tmp_path, screenshots="actions")
+    agent.fake.browser.fresh.return_value = False
+    agent.fake.pages.append(page(text="moved"))
+    monkeypatch.setattr(loop, "choose", lambda *_a, **_k: decision("e3", "CLICK"))
+    agent.command("predict")
+    agent.close()
+    assert len(shots(tmp_path)) == 2  # first page and final page only
+
+
+def test_every_event_and_the_report_pass_through_the_scrub_given_to_evidence(tmp_path):
+    evidence = Evidence(tmp_path / "e", clean=lambda value: json.loads(json.dumps(value).replace("TOPSECRET", "<x>")))
+    evidence.event("step", index=0, status="active", note="a TOPSECRET b", nested={"k": ["TOPSECRET"]})
+    evidence.event("run_end", status="done", stop_reason=None, verified=False, totals={}, screenshot=None)
+    evidence.events[0]["note"] = "a TOPSECRET b"  # The report must clean what it renders, whatever was kept.
+    evidence.close()
+    assert "TOPSECRET" not in (tmp_path / "e" / "trace.jsonl").read_text()
+    assert "<x>" in (tmp_path / "e" / "trace.jsonl").read_text()
+    assert "TOPSECRET" not in (tmp_path / "e" / "report.html").read_text()
