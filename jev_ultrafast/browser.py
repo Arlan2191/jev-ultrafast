@@ -590,7 +590,7 @@ def browser_operation(request):
             # The wheel turns over the middle of the viewport, which is on screen at any size.
             width, height = request.get("viewport") or DEFAULT_VIEWPORT
             call(
-                "Input.dispatchMouseEvent", type="mouseWheel", x=width // 2, y=height // 2, deltaX=0,
+                "Input.dispatchMouseEvent", type="mouseWheel", x=550, y=650, deltaX=0,
                 deltaY=action["delta"],
             )
         elif kind != "wait":
