@@ -4,9 +4,9 @@ One JSON object per line. Every event has `t_ms` (milliseconds since the run sta
 `run_start`, which carries `trace_schema`. `load_trace` reads a file back and raises ValueError for anything this
 version does not understand, so a reader never guesses at a layout it was not written for.
 
-Schema 2 adds the `heal` event type and fields on `action` events (step, source, name, option, delta, focus, focus_locator, page_url) and in
-the locator (digest). It reads schema 1 traces too; a `heal` event inside a schema 1 trace is an error, because a
-schema 1 writer never produced one.
+Schema 2 adds the `heal` event type and fields on `action` events (step, source, name, option, delta, focus,
+focus_locator, page_url) and in the locator (digest). It reads schema 1 traces too; a `heal` event inside a schema 1
+trace is an error, because a schema 1 writer never produced one.
 """
 
 import json
