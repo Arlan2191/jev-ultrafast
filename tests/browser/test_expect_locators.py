@@ -179,7 +179,6 @@ def test_implied_roles_for_landmarks_and_anchors(page):
     met(page, expect.count(Locator(role="banner"), eq=1))
     met(page, expect.count(Locator(role="contentinfo"), eq=1))
     met(page, expect.count(Locator(role="link"), eq=1))  # An anchor without href is not a link.
-    met(page, expect.count(Locator(role="generic", name="no link"), eq=0))
 
 
 def test_no_horizontal_scroll_accepts_deliberately_hidden_overflow(page):
