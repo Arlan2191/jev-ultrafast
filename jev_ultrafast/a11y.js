@@ -272,7 +272,23 @@
         }
       }
     }
+    // A control that was the only one with its role + name in the whole page, and still is, needs no digest: the scope
+    // digest could not pick another element. It must still lie inside some scope of the recorded role + name (any
+    // ordinal), so a unique control that moved under a differently named scope is not followed.
+    const alone = () => {
+      if (loc.name === undefined || !loc.ordinal || loc.ordinal.document_count!==1) return null;
+      const found = mine(document, loc.role ?? null, loc.name, loc.tag, loc.type ?? null);
+      if (found.length!==1 || !verifies(found[0], loc)) return null;
+      if (loc.scope && !scopesLike(loc.scope).some(s => s.contains(found[0]))) return null;
+      return {element:found[0], rule:'unique_in_document', unique:true, count_match:null, verified:true};
+    };
     const main = primary();
+    const only = alone();
+    if (only) {
+      // The primary rule resolving a different element is a disagreement: a refusal. The same element keeps its rule.
+      if (main && main.element && main.element!==only.element) return none('ambiguous');
+      return main && main.element ? main : only;
+    }
     if (main) return main;
     // The stable id is a fallback only: it can only be trusted to be the same element when it is unique now and was
     // unique when recorded, and the recorded scope (if any) was the only one of its kind.
