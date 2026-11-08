@@ -167,3 +167,18 @@ def test_every_field_that_changes_the_result_changes_the_description():
     ]
     descriptions = [check.description for check in variants]
     assert len(set(descriptions)) == len(descriptions)
+
+
+def test_describe_quotes_values_so_a_pathological_pair_differs():
+    one = expect.visible(Locator(role="button", name='a" text="b'))
+    two = expect.visible(Locator(role="button", name="a", text="b"))
+    assert one.description != two.description
+
+
+def test_exact_with_a_regex_is_refused():
+    import re
+
+    for key in ("name", "label", "text"):
+        extra = {"role": "button"} if key == "name" else {}
+        with pytest.raises(ValueError, match="exact"):
+            Locator(**{key: re.compile("a")}, exact=True, **extra)

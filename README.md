@@ -221,12 +221,12 @@ print(state["status"], state["verified"], [s["status"] for s in state["steps"]])
 
   | field | matches |
   | --- | --- |
-  | `role`, `name` | the ARIA role (explicit, or implied by the tag, including region, banner, contentinfo; an `<a>` without `href` is not a link) and accessible name; a name needs a role. Elements hidden from the accessibility tree (`display:none`, `visibility:hidden`, inside `aria-hidden="true"`) are left out, as in Playwright's `getByRole`, unless `include_hidden=True` |
+  | `role`, `name` | the ARIA role (explicit, or implied by the tag, including region; banner and contentinfo only for a `<header>`/`<footer>` outside article, aside, main, nav and section; an `<a>` without `href` is not a link) and accessible name; a name needs a role. Elements hidden from the accessibility tree (`display:none`, `visibility:hidden`, inside `aria-hidden="true"`) are left out, as in Playwright's `getByRole`, unless `include_hidden=True` |
   | `test_id`, `test_id_attribute` | the attribute value, always exact; the attribute defaults to `data-testid` |
   | `label` | `aria-label`, the text of `aria-labelledby` targets (their full text content, hidden targets included), or a `<label>` (`for=` or wrapping) |
   | `text` | the smallest element whose text content contains it (whitespace is normalised; hidden descendants count, as in Playwright's `getByText`) |
   | `css` | a selector you wrote; the model never produces one |
-  | `exact` | `name`, `label` and `text` must equal the text (case-sensitive) instead of containing it (case-insensitive substring, as in Playwright). `name`, `label` and `text` also take a compiled regex (JavaScript-compatible, flags `i`, `s`, `m`), searched in the whitespace-normalised text; `exact` does not apply to it |
+  | `exact` | `name`, `label` and `text` must equal the text (case-sensitive) instead of containing it (case-insensitive substring, as in Playwright). `name`, `label` and `text` also take a compiled regex (JavaScript-compatible, flags `i`, `s`, `m`), searched in the whitespace-normalised text; `exact` with a regex raises `ValueError`. `text` ignores the text of `<script>`, `<style>`, `<template>` and `<noscript>` |
   | `within` | another Locator: the match must be a descendant of one of its matches |
   | `nth` | 0-based index into the matches in document order; visibility is **not** applied first, so a hidden match counts |
 

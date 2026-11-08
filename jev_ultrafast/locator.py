@@ -1,6 +1,7 @@
 """A Playwright-style description of the elements a check looks at. Plain data: the page-side function in waits.js
 does the finding, so a Locator is frozen, hashable and serialisable (`as_dict`)."""
 
+import json
 import re
 from dataclasses import dataclass, fields, replace
 
@@ -29,12 +30,16 @@ def wire(value):
     return pattern("pattern", value) if isinstance(value, re.Pattern) else value
 
 
+def quoted(value):
+    return json.dumps(value, ensure_ascii=False)
+
+
 def shown(value):
     """A name, label or text in a description: quoted, or /regex/flags."""
     if isinstance(value, re.Pattern):
         spec = wire(value)
         return f"/{spec['r']}/{spec['f']}"
-    return f'"{value}"'
+    return quoted(value)
 
 
 @dataclass(frozen=True)
@@ -49,7 +54,7 @@ class Locator:
     text          the smallest element whose text content contains it (whitespace-normalised, hidden text included).
     css           a selector the caller wrote; the model never produces one.
     exact         name, label and text must equal the text (case-sensitive) instead of containing it
-                  (case-insensitive substring, as in Playwright). Ignored for a compiled regex, which is searched
+                  (case-insensitive substring, as in Playwright). Not allowed with a compiled regex, which is searched
                   in the whitespace-normalised text with its own flags.
     include_hidden  role locators also match elements hidden from the accessibility tree.
     within        another Locator: the match must be a descendant of one of its matches.
@@ -83,6 +88,8 @@ class Locator:
             raise ValueError("within must be a Locator")
         if self.nth is not None and (type(self.nth) is not int or self.nth < 0):
             raise ValueError("nth must be a non-negative integer")
+        if self.exact and any(isinstance(getattr(self, key), re.Pattern) for key in ("name", "label", "text")):
+            raise ValueError("exact does not apply to a regex: put the anchors in the pattern")
         if self.name is not None and self.role is None:
             raise ValueError("a name belongs to a role: pass role as well")
         if not (self.role or self.test_id or self.label or self.text or self.css):
@@ -108,9 +115,9 @@ class Locator:
             if value is not None:
                 parts.append(f"{key}={shown(value)}")
         if self.css is not None:
-            parts.append(f"css={self.css}")
+            parts.append(f"css={quoted(self.css)}")
         if self.test_id is not None and self.test_id_attribute != DEFAULT_TEST_ID_ATTRIBUTE:
-            parts.append(f"attribute={self.test_id_attribute}")
+            parts.append(f"attribute={quoted(self.test_id_attribute)}")
         if self.exact:
             parts.append("exact")
         if self.include_hidden:

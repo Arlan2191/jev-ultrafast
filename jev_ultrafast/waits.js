@@ -177,11 +177,15 @@
   };
   const IMPLIED = {H1: 'heading', H2: 'heading', H3: 'heading', H4: 'heading', H5: 'heading', H6: 'heading', IMG: 'img',
     UL: 'list', OL: 'list', LI: 'listitem', NAV: 'navigation', MAIN: 'main', DIALOG: 'dialog', FORM: 'form',
-    TABLE: 'table', TR: 'row', TD: 'cell', TH: 'columnheader', ARTICLE: 'article', ASIDE: 'complementary',
-    HEADER: 'banner', FOOTER: 'contentinfo'};
+    TABLE: 'table', TR: 'row', TD: 'cell', TH: 'columnheader', ARTICLE: 'article', ASIDE: 'complementary'};
   const implied = e => {
     if (e.tagName === 'A' && !e.hasAttribute('href')) return 'generic';
     if (e.tagName === 'SECTION') return e.hasAttribute('aria-label') || e.hasAttribute('aria-labelledby') ? 'region' : null;
+    // HTML-AAM: a header/footer is a landmark only outside sectioning content.
+    if (e.tagName === 'HEADER' || e.tagName === 'FOOTER') {
+      if (e.parentElement?.closest('article,aside,main,nav,section')) return null;
+      return e.tagName === 'HEADER' ? 'banner' : 'contentinfo';
+    }
     return IMPLIED[e.tagName] || null;
   };
   const roleOf = e => (e.getAttribute('role') || '').trim().split(/\s+/)[0] || (e.tagName === 'A' && !e.hasAttribute('href') ? null : role(e)) || implied(e);
@@ -202,7 +206,15 @@
     for (const l of e.labels || []) found.push(name(l));
     return found;
   };
-  const textOfEl = e => e.textContent || ''; // Hidden descendants count, as in Playwright's getByText.
+  // textContent, so hidden descendants count as in Playwright's getByText, minus script, style, template and noscript text.
+  const textOfEl = e => {
+    let text = '';
+    const walker = document.createTreeWalker(e, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (!n.parentElement?.closest('script,style,template,noscript')) text += n.data;
+    }
+    return text;
+  };
   const locate = loc => {
     let pool;
     if (loc.css) {
@@ -272,8 +284,11 @@
     locator(spec) {
       if (spec.op === 'no_hscroll') {
         const root = document.documentElement;
-        // A page that hides sideways overflow on purpose cannot be scrolled sideways by the user.
-        if ([root, document.body].some(e => e && ['hidden', 'clip'].includes(getComputedStyle(e).overflowX))) return null;
+        // A page that hides sideways overflow on purpose cannot be scrolled sideways by the user. The viewport takes
+        // html's overflow; body's only propagates to it when html's is visible (CSS overflow propagation).
+        const clipsX = e => ['hidden', 'clip'].includes(getComputedStyle(e).overflowX);
+        const viewportX = getComputedStyle(root).overflowX === 'visible' && document.body ? document.body : root;
+        if (clipsX(viewportX)) return null;
         const width = Math.max(root.scrollWidth, document.body?.scrollWidth ?? 0);
         return width <= root.clientWidth + 1 ? null : 'the page scrolls horizontally (' + width + ' px of content in ' + root.clientWidth + ' px)';
       }

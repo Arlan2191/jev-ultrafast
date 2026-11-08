@@ -176,9 +176,19 @@ def test_regex_for_name_text_and_label_uses_its_flags(page):
 
 def test_implied_roles_for_landmarks_and_anchors(page):
     met(page, expect.count(Locator(role="region", name="Notes"), eq=1))
+    # Only the body-level header/footer are landmarks; the ones inside <article> are generic.
+    met(page, expect.element_text(Locator(role="banner"), equals="Site banner"))
+    met(page, expect.element_text(Locator(role="contentinfo"), equals="Site footer"))
     met(page, expect.count(Locator(role="banner"), eq=1))
     met(page, expect.count(Locator(role="contentinfo"), eq=1))
+    met(page, expect.count(Locator(text="Article head"), eq=1))
     met(page, expect.count(Locator(role="link"), eq=1))  # An anchor without href is not a link.
+
+
+def test_text_ignores_script_style_and_template_text(page):
+    unmet(page, expect.visible(Locator(text="secret-script-text")), "no matching")
+    unmet(page, expect.visible(Locator(text="secret-style-text")), "no matching")
+    met(page, expect.element_text(Locator(css="#scripted"), equals="Visible"))
 
 
 def test_no_horizontal_scroll_accepts_deliberately_hidden_overflow(page):
@@ -188,5 +198,15 @@ def test_no_horizontal_scroll_accepts_deliberately_hidden_overflow(page):
         page.browser.evaluate(f"document.documentElement.style.overflowX = '{value}'")
         met(page, expect.no_horizontal_scroll())
     page.browser.evaluate("document.documentElement.style.overflowX = ''")
+
+
+def test_body_overflow_counts_only_when_it_propagates_to_the_viewport(page):
+    page.browser.evaluate("document.getElementById('wide').style.display = 'block'")
+    # html visible: body's overflow propagates to the viewport.
     page.browser.evaluate("document.body.style.overflowX = 'hidden'")
     met(page, expect.no_horizontal_scroll())
+    # html overflow-y:auto makes html's own overflow non-visible, so body's no longer reaches the viewport.
+    page.browser.evaluate("document.documentElement.style.overflowY = 'auto'")
+    unmet(page, expect.no_horizontal_scroll(), "horizontal")
+    page.browser.evaluate("document.documentElement.style.overflowY = ''")
+    page.browser.evaluate("document.body.style.overflowX = ''")
