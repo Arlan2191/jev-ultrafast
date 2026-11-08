@@ -237,6 +237,9 @@ class Agent:
                 if not step.expect:
                     raise ValueError(f"Step {number} has no expect checks (require_expectations=True)")
         values = validate_values(values)
+        for number, step in enumerate(steps, 1):
+            if clash := sorted(set(step.params) & set(values)):
+                raise ValueError(f"Step {number} param {clash[0]!r} is named like a declared value")
         if type(heal) is not bool:
             raise ValueError("heal must be True or False")
         positive_int("replay_quiet_ms", replay_quiet_ms, optional=True, minimum=0)
@@ -460,8 +463,15 @@ class Agent:
             browser={"product": version.get("product"), "user_agent": version.get("userAgent")},
             viewport=dict(zip(("width", "height"), self.viewport)),
             steps=[
-                {"goal": step.goal, "checks": [e.description for e in step.expect], "values": {
-                    name: v.secret for name, v in step.values.items()}}
+                {
+                    "goal": step.goal,
+                    "checks": [e.description for e in step.expect],
+                    "values": {name: v.secret for name, v in step.values.items()},
+                    "goal_template": step.template,
+                    "check_templates": list(step.check_templates),
+                    "param_names": sorted(step.params),
+                    "params": dict(step.params),
+                }
                 for step in self.steps
             ],
             values=names,

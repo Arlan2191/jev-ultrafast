@@ -2,8 +2,9 @@
 
 import html
 import json
+import string
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .expect import Expectation
 from .questions import GENERATE, NONE  # NONE: "no declared value fits", offered when values but no text helper exist.
@@ -53,11 +54,19 @@ class Value:
 
 @dataclass(frozen=True)
 class Step:
-    """One goal. `expect` checks (see jev_ultrafast.expect) decide whether it is done; `values` override the agent's."""
+    """One goal. `expect` checks (see jev_ultrafast.expect) decide whether it is done; `values` override the agent's.
+
+    `params={name: str}` fills `{name}` placeholders in the goal and in the check descriptions (str.format style,
+    `{{` and `}}` for literal braces) with text that only exists in this run. `goal` and the check descriptions are
+    the RENDERED text, which is all the model, the evidence and the hook see; `template` and `check_templates` keep
+    the placeholders, and a replay compares those, never the param values. Without `params` the goal is literal."""
 
     goal: str
     expect: tuple = ()
     values: dict = field(default_factory=dict)
+    params: dict | None = None
+    template: str = field(default="", init=False, compare=False)
+    check_templates: tuple = field(default=(), init=False, compare=False)
 
     def __post_init__(self):
         if not isinstance(self.goal, str) or not self.goal.strip():
@@ -65,9 +74,60 @@ class Step:
         expect = (self.expect,) if isinstance(self.expect, Expectation) else tuple(self.expect or ())
         if not all(isinstance(e, Expectation) for e in expect):
             raise ValueError("Step expect must hold jev_ultrafast.expect constructors")
-        object.__setattr__(self, "goal", self.goal.strip())
+        values = validate_values(self.values)
+        params = validate_params(self.params, values)
+        template = self.goal.strip()
+        templates = tuple(e.description for e in expect)
+        if params is not None:
+            used = set()
+            goal = render(template, params, used)
+            expect = tuple(replace(e, description=render(e.description, params, used)) for e in expect)
+            if unused := sorted(set(params) - used):
+                raise ValueError(f"Step params {', '.join(unused)} are unused by the goal and the check descriptions")
+            forms = [f for v in values.values() if v.secret for f in secret_forms(v.text)]
+            if any(form in text for text in params.values() for form in forms):
+                raise ValueError("A step param contains a declared secret value; params are shown to the model")
+        else:
+            goal = template
+        object.__setattr__(self, "goal", goal)
         object.__setattr__(self, "expect", expect)
-        object.__setattr__(self, "values", validate_values(self.values))
+        object.__setattr__(self, "values", values)
+        object.__setattr__(self, "params", params or {})
+        object.__setattr__(self, "template", template)
+        object.__setattr__(self, "check_templates", templates)
+
+
+def validate_params(params, values):
+    """None (no params: the goal is literal) or {name: non-empty str}. Params are data shown to the model."""
+    if params is None:
+        return None
+    if not isinstance(params, dict):
+        raise ValueError("params must be a dict of name -> str")
+    for name, text in params.items():
+        if not (isinstance(name, str) and name.isidentifier() and len(name) <= 64):
+            raise ValueError("A param name must be a plain identifier of at most 64 characters")
+        if name in values:
+            raise ValueError(f"Param {name!r} is named like a declared value; a name is one or the other")
+        if not isinstance(text, str) or not text or len(text) > MAX_TEXT:
+            raise ValueError(f"Param {name!r} must be a non-empty string of at most {MAX_TEXT} characters")
+    return dict(params)
+
+
+def render(text, params, used):
+    """`text` with its `{name}` placeholders filled from params; the names found are added to `used`."""
+    try:
+        parts = list(string.Formatter().parse(text))
+    except ValueError as error:
+        raise ValueError(f"Bad placeholder in {text!r}: {error}") from None
+    for _literal, name, spec, conversion in parts:
+        if name is None:
+            continue
+        if not name.isidentifier() or spec or conversion:
+            raise ValueError(f"A placeholder must be a plain name like {{title}}, in {text!r}")
+        if name not in params:
+            raise ValueError(f"Placeholder {{{name}}} has no param")
+        used.add(name)
+    return "".join(literal + (params[name] if name is not None else "") for literal, name, _s, _c in parts)
 
 
 def validate_values(values):

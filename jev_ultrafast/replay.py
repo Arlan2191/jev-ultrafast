@@ -82,17 +82,29 @@ def secrecy(values):
     return {name: bool(getattr(v, "secret", v)) for name, v in (values or {}).items()}
 
 
+def compare_texts(old, step):
+    """(goal matches, recorded checks, this run's checks): templates and param names when the trace has them, else
+    the rendered text. Param values are this run's data and never compared."""
+    if "goal_template" not in old:
+        return normalise(old["goal"]) == normalise(step.goal), old["checks"], [e.description for e in step.expect]
+    same = normalise(old["goal_template"]) == normalise(step.template)
+    same = same and set(old.get("param_names") or ()) == set(step.params)
+    return same, old.get("check_templates", old["checks"]), step.check_templates
+
+
 def match(events, steps, values):
-    """Raise ValueError unless the trace was recorded for these steps (goals, check descriptions) and value names."""
+    """Raise ValueError unless the trace was recorded for these steps (goal and check templates, param names, value
+    names)."""
     start = events[0]
     recorded = start["steps"]
     if len(recorded) != len(steps):
         raise ValueError(f"replay_mismatch: the trace has {len(recorded)} steps, the run has {len(steps)}")
     for number, (old, step) in enumerate(zip(recorded, steps, strict=True), 1):
-        if normalise(old["goal"]) != normalise(step.goal):
+        same, old_checks, checks = compare_texts(old, step)
+        if not same:
             raise ValueError(f"replay_mismatch: step {number} goal differs from the trace")
-        checks = [normalise(e.description) for e in step.expect]
-        if [normalise(c) for c in old["checks"]] != checks:
+        checks = [normalise(c) for c in checks]
+        if [normalise(c) for c in old_checks] != checks:
             raise ValueError(f"replay_mismatch: step {number} checks differ from the trace")
         if set(old.get("values") or {}) != set(step.values):
             raise ValueError(f"replay_mismatch: step {number} value names differ from the trace")
