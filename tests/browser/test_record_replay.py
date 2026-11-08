@@ -1,6 +1,7 @@
 """Record a run once, then replay it on real pages without the model, and heal where the page changed. The model is a
 stub that knows the answers while recording and fails the test when it is asked during a replay: no paid call."""
 
+import json
 import os
 import statistics
 import time
@@ -798,3 +799,96 @@ def test_a_test_id_moved_onto_a_same_name_look_alike_is_a_refusal_that_heals(lab
     again.close()
     heal = next(e for e in load_trace(lab.trace(again)) if e["type"] == "heal")
     assert heal["cause"] == "ambiguous"
+
+
+# --- step goal parameters ---------------------------------------------------------------------------------------
+
+TARGET_OPEN = "window.__jevFast.ids.get(document.querySelector('[data-row=target] button'))"
+GOAL = "Open the order titled {title}"
+
+
+def target_chooser():
+    return pick_chooser(
+        lambda page, c: next(a["id"] for a in page["actions"] if a.get("node") == c.agent.browser.evaluate(TARGET_OPEN))
+    )
+
+
+def title_steps(title):
+    return [Step(GOAL, expect=expect.text("Opened {title}"), params={"title": title})]
+
+
+def record_order_a(lab, chooser, url):
+    agent, state, _model, _wall = lab.run(url=f"{url}name=Order%20A", goals=title_steps("Order A"), chooser=chooser)
+    assert state["status"] == "done" and state["verified"] and lab.clicked(agent) == ["target"]
+    assert chooser.calls == ["Open the order titled Order A"]
+    agent.close()
+    chooser.forbid = True
+    return agent
+
+
+def test_a_replay_with_another_param_value_resolves_inside_the_row_it_names(lab):
+    chooser = target_chooser()
+    agent = record_order_a(lab, chooser, "replay_params.html?")
+    locators = [e["locator"] for e in load_trace(lab.trace(agent)) if e["type"] == "action"]
+    assert locators[0]["scope"]["param"] == "title" and locators[0]["scope"]["name"] == "{title}"
+    assert "Order A" not in json.dumps(locators)  # the param's name is recorded, never its value
+
+    again, replayed, _model, _wall = lab.run(
+        url="replay_params.html?name=Order%20B", goals=title_steps("Order B"), chooser=chooser, replay=lab.trace(agent)
+    )
+    assert replayed["status"] == "done" and replayed["verified"] is True, replayed["stop_reason"]
+    assert chooser.calls == [] and replayed["decisions"] == [] and replayed["text_calls"] == []
+    assert sources(replayed) == ["replay"] and lab.clicked(again) == ["target"]
+    assert replayed["replay"]["model_calls"] == 0 and replayed["replay"]["steps_healed"] == 0
+    again.close()
+    assert load_trace(lab.trace(again))[-1]["totals"]["jev_calls"] == 0
+
+
+def test_a_test_id_on_a_row_named_by_neither_value_is_not_acted_on(lab):
+    chooser = target_chooser()
+    agent = record_order_a(lab, chooser, "replay_params.html?")
+    # The page has no row titled "Order B"; the recorded test id now sits on the "Other ..." row.
+    again, replayed, _model, _wall = lab.run(
+        url="replay_params.html?name=Order%20C&moved=1", goals=title_steps("Order B"), chooser=chooser,
+        replay=lab.trace(agent), heal=False,
+    )
+    assert replayed["status"] == "diverged" and replayed["verified"] is not True
+    assert lab.clicked(again) == [] and chooser.calls == [] and sources(replayed) == []
+
+
+def test_a_stable_id_on_a_row_named_by_neither_value_is_not_acted_on(lab):
+    chooser = target_chooser()
+    agent = record_order_a(lab, chooser, "replay_params.html?byid=1&")
+    # No row is titled "Order B"; row A still holds the recorded id. The id fallback must not click it.
+    again, replayed, _model, _wall = lab.run(
+        url="replay_params.html?byid=1&name=Order%20A", goals=title_steps("Order B"), chooser=chooser,
+        replay=lab.trace(agent), heal=False,
+    )
+    assert replayed["status"] == "diverged" and replayed["verified"] is not True
+    assert lab.clicked(again) == [] and chooser.calls == [] and sources(replayed) == []
+
+
+def test_a_test_id_on_a_row_that_does_not_carry_the_param_fails_the_param_check(lab):
+    chooser = target_chooser()
+    agent, state, _model, _wall = lab.run(
+        url="replay_params.html?plain=1&name=Order%20A", goals=title_steps("Order A"), chooser=chooser
+    )
+    assert state["status"] == "done" and state["verified"]
+    agent.close()
+    chooser.forbid = True
+    # No scope (plain rows): the test id resolves to the decoy row, and "Opened Order B" never shows.
+    again, replayed, _model, _wall = lab.run(
+        url="replay_params.html?plain=1&name=Order%20C&moved=1", goals=title_steps("Order B"), chooser=chooser,
+        replay=lab.trace(agent), heal=False, expect_timeout_ms=500,
+    )
+    assert replayed["status"] == "diverged" and replayed["verified"] is not True
+    assert replayed["steps"][0]["status"] != "done" and chooser.calls == []
+
+
+def test_a_changed_goal_template_is_a_replay_mismatch_even_with_the_same_param_value(lab):
+    chooser = target_chooser()
+    agent = record_order_a(lab, chooser, "replay_params.html?")
+    changed = [Step("Open the order called {title}", expect=expect.text("Opened {title}"), params={"title": "Order A"})]
+    with pytest.raises(ValueError, match="replay_mismatch.*step 1 goal"):
+        lab.run(url="replay_params.html?name=Order%20A", goals=changed, chooser=chooser, replay=lab.trace(agent))
+    assert chooser.calls == []

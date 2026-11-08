@@ -237,6 +237,14 @@ class Agent:
                 if not step.expect:
                     raise ValueError(f"Step {number} has no expect checks (require_expectations=True)")
         values = validate_values(values)
+        for number, step in enumerate(steps, 1):
+            if replay is not None and step.params and not step.param_checked:
+                raise ValueError(
+                    f"Step {number} has params but no check that uses one: a replay does not check that the located "
+                    "element belongs to the param value, so give the step a check with a {name} placeholder"
+                )
+            if clash := sorted(set(step.params) & set(values)):
+                raise ValueError(f"Step {number} param {clash[0]!r} is named like a declared value")
         if type(heal) is not bool:
             raise ValueError("heal must be True or False")
         positive_int("replay_quiet_ms", replay_quiet_ms, optional=True, minimum=0)
@@ -460,8 +468,15 @@ class Agent:
             browser={"product": version.get("product"), "user_agent": version.get("userAgent")},
             viewport=dict(zip(("width", "height"), self.viewport)),
             steps=[
-                {"goal": step.goal, "checks": [e.description for e in step.expect], "values": {
-                    name: v.secret for name, v in step.values.items()}}
+                {
+                    "goal": step.goal,
+                    "checks": [e.description for e in step.expect],
+                    "values": {name: v.secret for name, v in step.values.items()},
+                    "goal_template": step.template,
+                    "check_templates": list(step.check_templates),
+                    "param_names": sorted(step.params),
+                    "params": dict(step.params),
+                }
                 for step in self.steps
             ],
             values=names,
@@ -537,7 +552,7 @@ class Agent:
             return None, type(error).__name__
         if found and found.get("error"):
             return None, found["error"]
-        return (self.clean(found), None) if found else (None, "ElementGone")
+        return (self.parametrized(self.clean(found)), None) if found else (None, "ElementGone")
 
     def locate_focus(self, page):
         """The locator of the element that has focus, for a key press (None when nothing has focus, locators are off
@@ -549,7 +564,16 @@ class Agent:
             found = self.read_locator(node)
         except Exception:
             return None
-        return self.clean(found) if found and not found.get("error") else None
+        return self.parametrized(self.clean(found)) if found and not found.get("error") else None
+
+    def parametrized(self, locator):
+        """The locator as recorded: a scope named by a step param value keeps the param's name, not the value."""
+        return recorded.parametrize(locator, self.step_params())
+
+    def step_params(self):
+        """The params of the current step ({} for an Agent without steps)."""
+        step, _record = self.current_step()
+        return step.params if step else {}
 
     def read_locator(self, node):
         """The locator read of one node, once more when the page did not answer in time (a recorded step without a
@@ -1077,12 +1101,15 @@ class Agent:
         if planned.kind in recorded.ELEMENT:
             if not planned.locator:
                 return None, "locator_missing"
+            locator = recorded.bind(planned.locator, self.step_params())
+            if locator is None:
+                return None, "locator_missing"
             if cause := recorded.page_cause(
                 planned, self.state["page"]["url"], self.replay.routes, self.replay.id_segments
             ):
                 return None, cause
             try:
-                found = self.browser.resolve(planned.locator, node=True)
+                found = self.browser.resolve(locator, node=True)
             except ReadTimeout:
                 raise  # The page did not answer: a stale page (observe again), not a divergence.
             except Exception:
@@ -1114,7 +1141,10 @@ class Agent:
         if planned.kind != "key" or not planned.focus_locator:
             return None
         try:
-            found = self.browser.resolve(planned.focus_locator, node=True)
+            locator = recorded.bind(planned.focus_locator, self.step_params())
+            if locator is None:
+                return None
+            found = self.browser.resolve(locator, node=True)
         except ReadTimeout:
             raise
         except Exception:

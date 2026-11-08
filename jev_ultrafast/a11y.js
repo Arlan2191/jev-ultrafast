@@ -280,7 +280,13 @@
     const fallback = (element, rule, recordedUnique) => fallbackOk && recordedUnique===true && verifies(element, loc) ?
       {element, rule, unique:true, count_match:null, verified:true} : null;
     if (loc.id && anchorId(loc.id)) {
-      const hit = withId(loc.id)===1 ? fallback(document.getElementById(loc.id), 'id', loc.id_unique) : null;
+      let hit = withId(loc.id)===1 ? fallback(document.getElementById(loc.id), 'id', loc.id_unique) : null;
+      // With a scope the hit must sit inside the scope found by role + name + ordinal, like the test id: a bound
+      // scope that no longer exists (or another row holding the id) must not be acted on.
+      if (hit && loc.scope) {
+        const scopeEl = scopesLike(loc.scope)[loc.scope.ordinal ?? 0] ?? null;
+        if (!scopeEl || !scopeEl.contains(hit.element)) hit = null;
+      }
       if (hit) return hit;
     }
     if (loc.css_path) {

@@ -1366,6 +1366,7 @@ def test_a_single_read_timeout_still_recovers_and_the_count_starts_over(journey)
 
 def test_a_read_timeout_when_resolving_a_key_focus_is_not_a_missing_focus():
     agent = Agent.__new__(Agent)
+    agent.state = {}
     agent.browser = Mock(resolve=Mock(side_effect=ReadTimeout("Runtime.evaluate timed out")))
     planned = Mock(kind="key", focus_locator={"role": "textbox"})
     with pytest.raises(ReadTimeout):
@@ -1429,3 +1430,146 @@ def test_a_locator_read_is_tried_once_more_after_a_read_timeout(journey):
     again = [e for e in load_trace(journey.tmp_path / "twice" / "trace.jsonl") if e["type"] == "action"]
     assert {e["locator_error"] for e in again} == {"ReadTimeout"}
     assert journey.browser.locator.side_effect.call_count == 8  # Each of the 4 actions read twice, then gave up.
+
+
+# --- goal params: a goal that names a per-run thing replays across runs --------------------------------------
+
+
+def param_steps(journey, title):
+    steps = journey.steps()
+    flags = journey.flags
+    check = expect.check(lambda _p: flags["opened"], "opened {title}", auto=True)
+    steps[1] = Step("Open the row titled {title}", expect=check, params={"title": title})
+    return steps
+
+
+def record_with_title(journey, title="Order A"):
+    journey.script = [("f10", "TYPE_TEXT", "query"), ("c20", "CLICK"), ("c40", "CLICK"), ("c50", "CLICK")]
+    agent = journey.agent("recorded", goals=param_steps(journey, title))
+    final = journey.run(agent)
+    assert final["status"] == "done" and final["verified"], final["stop_reason"]
+    assert "Open the row titled Order A" in journey.asked
+    journey.reset()
+    return journey.tmp_path / "recorded" / "trace.jsonl"
+
+
+def test_the_trace_records_the_template_param_names_and_rendered_params(journey):
+    start = load_trace(record_with_title(journey))[0]
+    step = start["steps"][1]
+    assert step["goal"] == "Open the row titled Order A"
+    assert step["goal_template"] == "Open the row titled {title}"
+    assert step["param_names"] == ["title"] and step["params"] == {"title": "Order A"}
+    assert start["trace_schema"] == 2
+
+
+def test_replay_accepts_other_param_values_without_asking_the_model(journey):
+    trace = record_with_title(journey, "Order A")
+    agent, final = journey.replay(trace, goals=param_steps(journey, "Order B"))
+    assert final["status"] == "done" and final["verified"] is True
+    assert journey.asked == [] and sources(final) == ["replay"] * 4
+    assert final["steps"][1]["goal"] == "Open the row titled Order B"
+
+
+def test_replay_refuses_another_template_or_other_param_names(journey):
+    trace = record_with_title(journey)
+    other = journey.steps()
+    other[1] = Step(
+        "Pick the row titled {title}",
+        expect=expect.check(lambda _p: True, "opened {title}"),
+        params={"title": "Order A"},
+    )
+    with pytest.raises(ValueError, match="replay_mismatch.*step 2 goal"):
+        journey.agent("a", goals=other, replay=trace)
+    renamed = journey.steps()
+    renamed[1] = Step(
+        "Open the row titled {name}", expect=expect.check(lambda _p: True, "opened {name}"), params={"name": "Order A"}
+    )
+    with pytest.raises(ValueError, match="replay_mismatch.*step 2 goal"):
+        journey.agent("b", goals=renamed, replay=trace)
+    literal = journey.steps()
+    literal[1] = Step("Open the row titled Order A", expect=literal[1].expect)
+    with pytest.raises(ValueError, match="replay_mismatch.*step 2 goal"):
+        journey.agent("c", goals=literal, replay=trace)
+
+
+def test_a_trace_without_templates_compares_rendered_goals(journey):
+    events = load_trace(journey.record())
+    for step in events[0]["steps"]:
+        for key in ("goal_template", "param_names", "params", "check_templates"):
+            step.pop(key, None)
+    _agent, final = journey.replay(events)
+    assert final["status"] == "done" and journey.asked == []
+    events[0]["steps"][1]["goal"] = "Open the second row"
+    with pytest.raises(ValueError, match="replay_mismatch.*step 2 goal"):
+        journey.agent("x", replay=events)
+
+
+def test_a_healed_step_shows_the_model_this_runs_goal(journey):
+    trace = record_with_title(journey, "Order A")
+    journey.resolves["Row B"] = {**found("Row B"), "node": None, "unique": False}
+    journey.script = [("c40", "CLICK")]
+    _agent, final = journey.replay(trace, goals=param_steps(journey, "Order B"))
+    assert journey.asked == ["Open the row titled Order B"]
+
+
+def test_a_replay_of_a_step_with_params_and_no_check_using_one_is_refused_at_construction(journey):
+    trace = record_with_title(journey)
+    steps = journey.steps()
+    steps[1] = Step("Open the row titled {title}", expect=steps[1].expect, params={"title": "Order A"})
+    with pytest.raises(ValueError, match="Step 2 has params but no check that uses one"):
+        journey.agent("unchecked", goals=steps, replay=trace)
+    journey.agent("recording", goals=steps)  # a plain run (no replay=) is not refused
+    steps[1] = Step("Open the row titled {title}", expect=[], params={"title": "Order A"})
+    with pytest.raises(ValueError, match="Step 2 has params but no check that uses one"):
+        journey.agent("nothing", goals=steps, replay=trace)
+
+
+def scoped_locators(journey, name):
+    """The stubbed locator read gives Row B a list-item scope named `name`; resolves record what they were asked."""
+    plain = journey.browser.locator.side_effect
+    scope = {"role": "listitem", "name": name, "ordinal": 0, "count": 1, "css_path": "li"}
+    journey.browser.locator.side_effect = lambda node, full_urls=False: {
+        **plain(node, full_urls),
+        **({"scope": scope} if node == 40 else {}),
+    }
+    seen = []
+    resolve = journey.resolve
+    journey.browser.resolve.side_effect = lambda locator, node=False: (seen.append(locator), resolve(locator, node))[1]
+    return seen
+
+
+def test_a_scope_named_by_a_param_value_is_recorded_by_param_name_and_bound_on_replay(journey):
+    scoped_locators(journey, "Order A")
+    trace = record_with_title(journey, "Order A")
+    actions = [e for e in load_trace(trace) if e["type"] == "action"]
+    assert actions[2]["locator"]["scope"] == {
+        "role": "listitem", "name": "{title}", "param": "title", "ordinal": 0, "count": 1, "css_path": "li"
+    }
+    assert "Order A" not in json.dumps([e["locator"] for e in actions])
+    assert "scope" not in actions[3]["locator"]  # the other steps' locators are unchanged
+
+    seen = scoped_locators(journey, "Order B")
+    _agent, final = journey.replay(trace, goals=param_steps(journey, "Order B"))
+    assert final["status"] == "done" and final["verified"] is True and journey.asked == []
+    assert seen[2]["scope"] == {"role": "listitem", "name": "Order B", "ordinal": 0, "count": 1, "css_path": "li"}
+
+
+def test_a_scope_not_named_by_a_param_value_keeps_its_name(journey):
+    scoped_locators(journey, "Results")
+    trace = record_with_title(journey, "Order A")
+    scope = [e for e in load_trace(trace) if e["type"] == "action"][2]["locator"]["scope"]
+    assert scope["name"] == "Results" and "param" not in scope
+    seen = scoped_locators(journey, "Results")
+    _agent, final = journey.replay(trace, goals=param_steps(journey, "Order B"))
+    assert final["status"] == "done" and seen[2]["scope"]["name"] == "Results"
+
+
+def test_a_trace_scope_naming_a_param_the_run_lacks_is_a_divergence(journey):
+    scoped_locators(journey, "Order A")
+    events = load_trace(record_with_title(journey, "Order A"))
+    for event in events:
+        if event["type"] == "action" and event["locator"].get("scope"):
+            event["locator"]["scope"]["param"] = "other"
+    journey.script = [("c40", "CLICK")]
+    _agent, final = journey.replay(events, goals=param_steps(journey, "Order B"))
+    assert journey.asked == ["Open the row titled Order B"] and final["replay"]["steps_healed"] == 1

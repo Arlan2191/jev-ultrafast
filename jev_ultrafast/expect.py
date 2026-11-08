@@ -16,7 +16,7 @@ an action touched: a step whose action navigates away is checked against whateve
 import inspect
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .waits import WaitResult, element_state, non_negative, pattern
 
@@ -25,6 +25,23 @@ POLL_S = 0.05
 
 def describe(value):
     return f"/{value.pattern}/" if isinstance(value, re.Pattern) else f'"{value}"'
+
+
+def describe_of(kind, args):
+    """The description of a text, element or url check, built from its (possibly rendered) inputs."""
+    if kind == "text":
+        value = args["contains"]
+        regex = isinstance(value, re.Pattern)
+        if args["present"]:
+            return f"text {'matches' if regex else 'contains'} {describe(value)}"
+        return f"text does not {'match' if regex else 'contain'} {describe(value)}"
+    if kind == "url":
+        value = args["match"]
+        return f"url {'matches' if isinstance(value, re.Pattern) else 'contains'} {describe(value)}"
+    parts = [args["role"]] if args["role"] else []
+    parts += [describe(args["name"])] if args["name"] is not None else []
+    parts += [f"{key}={str(want).lower()}" for key, want in (args["state"] or {}).items()]
+    return f"{'element' if args['present'] else 'no element'} {' '.join(parts)}"
 
 
 def timeout_of(timeout_ms):
@@ -69,6 +86,20 @@ class Expectation:
     args: dict = field(default_factory=dict)
     fn: object = None
     auto: bool = False
+
+    def render(self, params, used):
+        """This check with its string inputs (contains, name, url match) filled from params and the description built
+        from them; a compiled regex stays literal. A caller-written `check` description is rendered instead. `used`
+        collects the param names found."""
+        from .steps import render
+
+        if self.kind == "check":
+            return replace(self, description=render(self.description, params, used))
+        key = {"text": "contains", "url": "match", "element": "name"}[self.kind]
+        if not isinstance(self.args.get(key), str):
+            return self
+        args = {**self.args, key: render(self.args[key], params, used)}
+        return replace(self, args=args, description=describe_of(self.kind, args))
 
     @property
     def cheap(self):
@@ -128,22 +159,15 @@ def contains(name, value):
 def text(contains_, *, timeout_ms=None):
     """The visible document text contains a string or compiled regex."""
     contains("contains", contains_)
-    kind = "matches" if isinstance(contains_, re.Pattern) else "contains"
-    return Expectation(
-        "text", f"text {kind} {describe(contains_)}", timeout_of(timeout_ms), {"contains": contains_, "present": True}
-    )
+    args = {"contains": contains_, "present": True}
+    return Expectation("text", describe_of("text", args), timeout_of(timeout_ms), args)
 
 
 def no_text(contains_, *, timeout_ms=None):
     """The visible document text does not contain a string or compiled regex."""
     contains("contains", contains_)
-    kind = "match" if isinstance(contains_, re.Pattern) else "contain"
-    return Expectation(
-        "text",
-        f"text does not {kind} {describe(contains_)}",
-        timeout_of(timeout_ms),
-        {"contains": contains_, "present": False},
-    )
+    args = {"contains": contains_, "present": False}
+    return Expectation("text", describe_of("text", args), timeout_of(timeout_ms), args)
 
 
 def element_args(role, name, state, present):
@@ -153,29 +177,26 @@ def element_args(role, name, state, present):
         raise ValueError("role must be a string")
     pattern("name", name, optional=True)
     states = element_state(state)
-    parts = [role] if role else []
-    parts += [describe(name)] if name is not None else []
-    parts += [f"{key}={str(want).lower()}" for key, want in states.items()]
-    return {"role": role, "name": name, "state": states or None, "present": present}, " ".join(parts)
+    return {"role": role, "name": name, "state": states or None, "present": present}
 
 
 def element(role=None, name=None, state=None, *, timeout_ms=None):
     """An element with this role, accessible name (exact or compiled regex) and state is visible."""
-    args, described = element_args(role, name, state, True)
-    return Expectation("element", f"element {described}", timeout_of(timeout_ms), args)
+    args = element_args(role, name, state, True)
+    return Expectation("element", describe_of("element", args), timeout_of(timeout_ms), args)
 
 
 def no_element(role=None, name=None, state=None, *, timeout_ms=None):
     """No visible element has this role, accessible name and state."""
-    args, described = element_args(role, name, state, False)
-    return Expectation("element", f"no element {described}", timeout_of(timeout_ms), args)
+    args = element_args(role, name, state, False)
+    return Expectation("element", describe_of("element", args), timeout_of(timeout_ms), args)
 
 
 def url(match, *, timeout_ms=None):
     """The page URL contains a string, or matches a compiled regex (searched, not anchored)."""
     contains("match", match)
-    kind = "matches" if isinstance(match, re.Pattern) else "contains"
-    return Expectation("url", f"url {kind} {describe(match)}", timeout_of(timeout_ms), {"match": match})
+    args = {"match": match}
+    return Expectation("url", describe_of("url", args), timeout_of(timeout_ms), args)
 
 
 def check(fn, description, auto=False, *, timeout_ms=None):

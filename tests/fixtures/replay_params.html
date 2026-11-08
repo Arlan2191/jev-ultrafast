@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Orders</title></head>
+<body>
+<!-- The row titles differ on every load. ?name=<text> names the target order (a random suffix when absent); the decoy row
+     beside it is always titled "Other ...". By default the rows are real list items (a locator scope named by the row's
+     first text, the case a varying title hits); ?plain=1 builds plain divs, which are no scope. The target's Open button
+     carries the test id, or the decoy's when ?moved=1. Opening a row prints "Opened <its title>"; window.__clicked lists
+     the opened rows. ?byid=1 gives the target's button a stable id
+     (id=open-target) instead of the test id. -->
+<main>
+  <h1>Orders</h1>
+  <div id="orders"></div>
+  <p id="opened"></p>
+</main>
+<script>
+  const query = new URLSearchParams(location.search);
+  const suffix = () => Math.random().toString(36).slice(2, 8);
+  const rows = [
+    {id: "decoy", title: "Other " + suffix()},
+    {id: "target", title: query.get("name") || "Order " + suffix()},
+  ];
+  const testId = query.has("moved") ? "decoy" : "target";
+  const plain = query.has("plain");
+  const list = document.createElement(plain ? "div" : "ul");
+  window.__clicked = [];
+  for (const row of rows) {
+    const item = document.createElement(plain ? "div" : "li");
+    item.dataset.row = row.id;
+    const title = document.createElement("span");
+    title.textContent = row.title;
+    const open = document.createElement("button");
+    open.type = "button";
+    open.textContent = "Open";
+    if (query.has("byid")) { if (row.id === "target") open.id = "open-target"; }
+    else if (row.id === testId) open.dataset.testid = "open-row";
+    open.onclick = () => {
+      window.__clicked.push(row.id);
+      document.getElementById("opened").textContent = "Opened " + row.title;
+    };
+    item.append(title, " ", open);
+    list.append(item);
+  }
+  document.getElementById("orders").append(list);
+</script>
+</body>
+</html>

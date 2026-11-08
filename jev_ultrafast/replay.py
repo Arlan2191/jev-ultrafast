@@ -26,6 +26,45 @@ def normalise(text):
     return " ".join(str(text).split())
 
 
+def clip(text):
+    """The scope name the page would show for this text (a11y.js clip: whitespace collapsed, 80 characters)."""
+    return normalise(text)[:80]
+
+
+def parametrize(locator, params):
+    """The locator to record: when its scope NAME is the page's rendering of a step param value, the scope keeps the
+    param's name (`param`) and a `{name}` placeholder, never the raw value. Other locators are returned unchanged.
+
+    Binding is by equality of text, not intent: an unrelated row whose name happens to equal a param value is bound
+    too, and a replay with another value looks for a row of that other name. The scope stays literal (and heals on a
+    changed name) when more than one param has the value, when the value does not fit the 80-unit clip whole, or when
+    it holds a character outside the BMP (Python clips by code point, the page by UTF-16 unit; equal only there)."""
+    scope = (locator or {}).get("scope")
+    if not params or not isinstance(scope, dict) or not isinstance(scope.get("name"), str):
+        return locator
+    names = [name for name, value in sorted(params.items()) if _bindable(value) and scope["name"] == clip(value)]
+    if len(names) != 1:
+        return locator
+    return {**locator, "scope": {**scope, "name": f"{{{names[0]}}}", "param": names[0]}}
+
+
+def _bindable(value):
+    text = normalise(value)
+    return len(text) <= 80 and all(ord(c) < 0x10000 for c in text)
+
+
+def bind(locator, params):
+    """The locator to resolve now: a scope recorded by param name takes this run's value of that param. None when the
+    run has no such param (a trace edited by hand); other locators are returned unchanged."""
+    scope = (locator or {}).get("scope")
+    if not isinstance(scope, dict) or "param" not in scope:
+        return locator
+    value = (params or {}).get(scope["param"])
+    if not isinstance(value, str):
+        return None
+    return {**locator, "scope": {**{k: v for k, v in scope.items() if k != "param"}, "name": clip(value)}}
+
+
 @dataclass(frozen=True)
 class Planned:
     """One executed action of the recorded run, as far as a replay needs it."""
@@ -82,17 +121,29 @@ def secrecy(values):
     return {name: bool(getattr(v, "secret", v)) for name, v in (values or {}).items()}
 
 
+def compare_texts(old, step):
+    """(goal matches, recorded checks, this run's checks): templates and param names when the trace has them, else
+    the rendered text. Param values are this run's data and never compared."""
+    if "goal_template" not in old:
+        return normalise(old["goal"]) == normalise(step.goal), old["checks"], [e.description for e in step.expect]
+    same = normalise(old["goal_template"]) == normalise(step.template)
+    same = same and set(old.get("param_names") or ()) == set(step.params)
+    return same, old.get("check_templates", old["checks"]), step.check_templates
+
+
 def match(events, steps, values):
-    """Raise ValueError unless the trace was recorded for these steps (goals, check descriptions) and value names."""
+    """Raise ValueError unless the trace was recorded for these steps (goal and check templates, param names, value
+    names)."""
     start = events[0]
     recorded = start["steps"]
     if len(recorded) != len(steps):
         raise ValueError(f"replay_mismatch: the trace has {len(recorded)} steps, the run has {len(steps)}")
     for number, (old, step) in enumerate(zip(recorded, steps, strict=True), 1):
-        if normalise(old["goal"]) != normalise(step.goal):
+        same, old_checks, checks = compare_texts(old, step)
+        if not same:
             raise ValueError(f"replay_mismatch: step {number} goal differs from the trace")
-        checks = [normalise(e.description) for e in step.expect]
-        if [normalise(c) for c in old["checks"]] != checks:
+        checks = [normalise(c) for c in checks]
+        if [normalise(c) for c in old_checks] != checks:
             raise ValueError(f"replay_mismatch: step {number} checks differ from the trace")
         if set(old.get("values") or {}) != set(step.values):
             raise ValueError(f"replay_mismatch: step {number} value names differ from the trace")
