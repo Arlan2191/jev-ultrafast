@@ -3,13 +3,15 @@
 <head><meta charset="utf-8"><title>Orders</title></head>
 <body>
 <!-- The row titles differ on every load: ?name=<text> names the target order, a random suffix when it is absent. The
-     target's Open button carries a test id; the decoy row beside it has none. window.__clicked lists opened rows. -->
+     target's Open button carries a test id; the decoy row beside it has none. The rows are plain divs, not list items:
+     a row is a locator scope named by its first text, so a varying title would make the recorded scope unfindable.
+     window.__clicked lists opened rows. -->
 <main>
   <h1>Orders</h1>
-  <ul>
-    <li data-row="decoy"><span id="decoy-title"></span> <button type="button" onclick="openRow('decoy')">Open</button></li>
-    <li data-row="target"><span id="target-title"></span> <button type="button" data-testid="open-target" onclick="openRow('target')">Open</button></li>
-  </ul>
+  <div id="orders">
+    <div data-row="decoy"><span id="decoy-title"></span> <button type="button" onclick="openRow('decoy')">Open</button></div>
+    <div data-row="target"><span id="target-title"></span> <button type="button" data-testid="open-target" onclick="openRow('target')">Open</button></div>
+  </div>
   <p id="opened"></p>
 </main>
 <script>
