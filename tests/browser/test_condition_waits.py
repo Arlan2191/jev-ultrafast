@@ -50,6 +50,16 @@ def begin_stream(browser):
     return started
 
 
+def await_page(browser, expression, timeout_s=10):
+    """Poll a page expression until it is truthy, so a wait never races page work that has not started yet."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if browser.evaluate(f"!!({expression})"):
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"page never reached: {expression}")
+
+
 def elapsed_ms(started):
     return (time.monotonic() - started) * 1000
 
@@ -94,10 +104,17 @@ def test_an_element_appears_after_the_stream_and_a_spinner_goes_away(start):
 
 def test_text_present_false_waits_for_text_to_leave(start):
     agent = start("fetch_render.html")
-    agent.browser.evaluate("document.getElementById('result').textContent='Working'; 1")
-    agent.browser.evaluate("setTimeout(() => { document.getElementById('result').textContent=''; }, 300); 1")
-    result = agent.wait_for("text", "Working", present=False, timeout_ms=3000)
-    assert result.met is True and result.waited_ms >= 250
+    browser = agent.browser
+    # Armed in the same evaluate that shows the text, so the page timer does not depend on how fast the wait starts.
+    browser.evaluate(
+        "window.__cleared = false; document.getElementById('result').textContent='Working'; "
+        "setTimeout(() => { document.getElementById('result').textContent=''; window.__cleared = true; }, 1000); 1"
+    )
+    result = agent.wait_for("text", "Working", present=False, timeout_ms=5000)
+    assert result.met is True, result
+    # The wait returned because the text left, not before: the timer had fired and the text is gone.
+    assert browser.evaluate("window.__cleared") is True
+    assert browser.evaluate("document.getElementById('result').textContent") == ""
 
 
 def test_a_long_lived_event_source_does_not_block_network_idle(start):
@@ -117,13 +134,19 @@ def test_an_ignored_long_poll_is_ignored_and_an_unignored_one_blocks(start):
 
 def test_dom_quiet_waits_for_mutations_to_stop(start):
     agent = start("fetch_render.html")
-    agent.browser.evaluate(
-        "let n = 0; const t = setInterval(() => { document.body.append(document.createElement('b')); "
-        "if (++n === 10) clearInterval(t); }, 50); 1"
+    browser = agent.browser
+    browser.evaluate(
+        "window.__ticks = 0; window.__done = false; const t = setInterval(() => { "
+        "document.body.append(document.createElement('b')); window.__ticks++; "
+        "if (window.__ticks === 20) { clearInterval(t); window.__done = true; } }, 25); 1"
     )
-    started = time.monotonic()
-    result = agent.wait_for("dom_quiet", quiet_ms=200, timeout_ms=5000)
-    assert result.met is True and elapsed_ms(started) >= 450
+    await_page(browser, "window.__ticks >= 1")  # The page is mutating before the wait starts.
+    ticks_before = browser.evaluate("window.__ticks")
+    result = agent.wait_for("dom_quiet", quiet_ms=300, timeout_ms=5000)
+    assert result.met is True, result
+    # The wait outlived the mutations: the interval had finished and nodes were appended after the wait began.
+    assert browser.evaluate("window.__done") is True
+    assert browser.evaluate("window.__ticks") == 20 and ticks_before < 20
 
 
 def test_a_click_that_fetches_is_observed_after_the_result_rendered_without_a_wait(start, monkeypatch):
@@ -303,29 +326,39 @@ def test_the_start_of_a_new_document_is_not_counted_as_a_recent_request(open_pag
 
 ANIMATE = (
     "const bar = document.createElement('div'); document.body.append(bar); let n = 0;"
-    " const timer = setInterval(() => { bar.style.width = (++n) + 'px'; if (n >= 100) clearInterval(timer); }, 20); 1"
+    " window.__animating = true;"
+    " const timer = setInterval(() => { bar.style.width = (++n) + 'px';"
+    " if (n >= 200) { clearInterval(timer); window.__animating = false; } }, 20); 1"
 )
 
 
 def test_attribute_noise_keeps_the_dom_busy_unless_the_attribute_is_ignored(start):
     agent = start("blank.html")
     agent.browser.evaluate(ANIMATE)
-    busy = agent.wait_for("dom_quiet", quiet_ms=200, timeout_ms=700)
-    ignored = agent.wait_for("dom_quiet", quiet_ms=200, timeout_ms=700, ignore_attributes=("style",))
+    await_page(agent.browser, "document.body.lastChild && document.body.lastChild.style.width")
+    busy = agent.wait_for("dom_quiet", quiet_ms=300, timeout_ms=700)
+    ignored = agent.wait_for("dom_quiet", quiet_ms=300, timeout_ms=700, ignore_attributes=("style",))
     print(
         f"style animation: default met={busy.met} in {busy.waited_ms} ms; "
         f"style ignored met={ignored.met} in {ignored.waited_ms} ms"
     )
-    assert busy.met is False and ignored.met is True and ignored.waited_ms < 500
+    assert busy.met is False and ignored.met is True
+    # Evidence, not a clock: the ignored wait was met while the attribute noise was still running.
+    assert agent.browser.evaluate("window.__animating") is True
+    assert ignored.waited_ms < 650  # Hang guard only (timeout is 700).
 
 
 def test_the_agent_level_ignored_attributes_apply_to_settled(start):
     agent = start("blank.html", wait_ignore_attributes=("style",))
     agent.browser.evaluate(ANIMATE)
+    await_page(agent.browser, "document.body.lastChild && document.body.lastChild.style.width")
     assert agent.wait_for("settled", quiet_ms=200, timeout_ms=700).met is True
     # A child list change is not an attribute: it still counts.
-    agent.browser.evaluate("setInterval(() => document.body.append(document.createElement('i')), 20); 1")
-    time.sleep(0.15)
+    agent.browser.evaluate(
+        "window.__added = 0; setInterval(() => { document.body.append(document.createElement('i')); "
+        "window.__added++; }, 20); 1"
+    )
+    await_page(agent.browser, "window.__added >= 1")
     assert agent.wait_for("settled", quiet_ms=200, timeout_ms=500).met is False
 
 
