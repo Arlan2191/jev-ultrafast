@@ -273,13 +273,17 @@
       }
     }
     // A control that was the only one with its role + name in the whole page, and still is, needs no digest: the scope
-    // digest could not pick another element. It must still lie inside some scope of the recorded role + name (any
-    // ordinal), so a unique control that moved under a differently named scope is not followed.
+    // digest could not pick another element. A recorded scope must still hold as for the test-id rule: as many scopes of
+    // the recorded role + name as then, the control inside the one at the recorded ordinal. A unique control that moved
+    // to another record of a same-named list, or into a reshaped list, is not followed.
     const alone = () => {
       if (loc.name === undefined || !loc.ordinal || loc.ordinal.document_count!==1) return null;
       const found = mine(document, loc.role ?? null, loc.name, loc.tag, loc.type ?? null);
       if (found.length!==1 || !verifies(found[0], loc)) return null;
-      if (loc.scope && !scopesLike(loc.scope).some(s => s.contains(found[0]))) return null;
+      if (loc.scope) {
+        const like = scopesLike(loc.scope);
+        if (like.length!==loc.scope.count || !(like[loc.scope.ordinal ?? 0]?.contains(found[0]))) return null;
+      }
       return {element:found[0], rule:'unique_in_document', unique:true, count_match:null, verified:true};
     };
     const main = primary();

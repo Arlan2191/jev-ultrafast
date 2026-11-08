@@ -5,7 +5,9 @@
 <!-- Responsive duplicate layout: two "Shell" main landmarks that both show live data (a different total on every load).
      The first holds a "Pick" button that is the only one in the document; it has no test id.
      ?variant=dup: the second landmark gets a "Pick" button too.
-     ?variant=moved: the button moves into a landmark named "Other". -->
+     ?variant=moved: the button moves into a landmark named "Other".
+     ?variant=second: the button sits in the second "Shell" landmark instead of the first.
+     ?variant=three: a third "Shell" landmark is added (the button stays in the first). -->
 <div id="host"></div>
 <p id="out"></p>
 <script>
@@ -29,8 +31,9 @@
     }
     document.getElementById("host").appendChild(main);
   };
-  landmark("Shell", variant !== "moved", "first");
-  landmark("Shell", variant === "dup", "second");
+  landmark("Shell", variant !== "moved" && variant !== "second", "first");
+  landmark("Shell", variant === "dup" || variant === "second", variant === "second" ? "first" : "second");
+  if (variant === "three") landmark("Shell", false, "third");
   if (variant === "moved") landmark("Other", true, "first");
 </script>
 </body>

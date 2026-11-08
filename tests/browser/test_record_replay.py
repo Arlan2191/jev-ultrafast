@@ -947,3 +947,26 @@ def test_a_unique_control_moved_into_a_differently_named_scope_is_not_clicked_by
     events = load_trace(lab.trace(again))
     assert any(e["type"] == "heal" for e in events)
     assert set(sources(healed)) == {"model"}  # The replay itself never pressed it.
+
+
+def test_a_unique_control_in_another_record_of_a_same_named_list_is_not_clicked_by_the_replay(lab):
+    chooser, agent = record_unique(lab)
+    again, healed, _model, _wall = lab.run(
+        url="replay_unique.html?variant=second", goals=UNIQUE_GOALS, chooser=chooser, replay=lab.trace(agent)
+    )
+    again.close()
+    events = load_trace(lab.trace(again))
+    assert any(e["type"] == "heal" for e in events)
+    assert set(sources(healed)) == {"model"}  # The replay itself never pressed it.
+
+
+def test_a_same_named_scope_added_to_the_page_heals_a_unique_control(lab):
+    chooser, agent = record_unique(lab)
+    again, healed, _model, _wall = lab.run(
+        url="replay_unique.html?variant=three", goals=UNIQUE_GOALS, chooser=chooser, replay=lab.trace(agent)
+    )
+    assert healed["status"] == "done" and lab.clicked(again) == ["first"]
+    again.close()
+    events = load_trace(lab.trace(again))
+    assert any(e["type"] == "heal" for e in events)
+    assert set(sources(healed)) == {"model"}
