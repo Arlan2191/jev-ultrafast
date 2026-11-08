@@ -91,6 +91,23 @@ uv run --env-file .env python examples/run.py \
 
 `uv run --env-file .env python examples/flights.py --keep-open` performs the flight search, checks the actual route/date/results, and saves its trace. It does not select or book a flight.
 
+### Driving a page you own
+
+A test runner that already has the page open (Playwright over CDP, with its own evidence and steps) can hand one step to the agent on that same tab. Pass the CDP target id instead of a URL:
+
+```python
+from jev_ultrafast import Agent
+
+# page = a Playwright page connected over CDP
+target_id = page.context.new_cdp_session(page).send("Target.getTargetInfo")["targetInfo"]["targetId"]
+
+with Agent(goals="Open the billing settings", target_id=target_id) as agent:
+    for state in agent.run():
+        pass
+```
+
+With `target_id` the agent attaches a session to that tab and does not create a target, navigate, or change the viewport (pass `viewport=` to set one). Pass `url` as well to navigate the attached tab first. Snapshots, waits, evidence capture and replay work as usual. `close()` only detaches: the tab stays open. `new_window` and focus emulation apply only to tabs the agent creates. An unknown `target_id` raises `ValueError`; with neither `url` nor `target_id`, so does construction.
+
 ### Keys and navigation
 
 `PRESS_KEY` sends one key to the element that has focus (marked `focused` in the element table), or to the page when nothing does. The model chooses among `Enter`, `Escape`, `Tab`, `Shift+Tab`, the arrow keys, `Space`, `Backspace`, `PageUp`, `PageDown`, `Home`, `End`, and any shortcut chords you declare. It never writes a key or a URL. `BACK` is offered only while the tab has a previous history entry (read from the browser's navigation history, not `history.length`, which also counts forward entries), `RELOAD` always, and `GOTO` only for pages you declare.

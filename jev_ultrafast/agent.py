@@ -165,6 +165,10 @@ class Agent:
     new_window: None (default) gives the owned tab a window of its own only in headless Chrome, where a background
     tab is throttled to about one frame per second after its first clicks; True or False force it. Headed Chrome
     has not been tested, and a new window there is a visible one.
+    target_id: drive a tab the caller already owns (a CDP target id) instead of opening one. Exactly one of url and
+    target_id is required, or both (url then navigates the attached tab). The agent attaches a session, never
+    creates a target, leaves the tab's size alone unless viewport is passed, and on close() only detaches: it never
+    closes a tab it did not create. new_window and focus emulation apply only to tabs the agent creates.
     viewport: (width, height) of the owned tab in CSS pixels, default (1120, 780), at most 7680x4320. Responsive pages
     change layout with it, so set it to match the other drivers or the screens you care about; it is recorded in the
     run_start event of the evidence. A replay does not
@@ -184,9 +188,10 @@ class Agent:
 
     def __init__(
         self,
-        url,
-        goals,
+        url=None,
+        goals=None,
         *,
+        target_id=None,
         record_dir=None,
         screenshots=None,
         evidence_dir=None,
@@ -217,7 +222,7 @@ class Agent:
         auto_complete=True,
         require_expectations=False,
         values=None,
-        viewport=DEFAULT_VIEWPORT,
+        viewport=None,
         replay=None,
         heal=True,
         replay_quiet_ms=150,
@@ -225,7 +230,13 @@ class Agent:
         replay_id_segments=True,
         cdp_timeout_ms=15000,
     ):
-        self.viewport = viewport = viewport_size(viewport)
+        explicit_viewport = viewport
+        if url is None and target_id is None:
+            raise ValueError("give a url or target_id")
+        if goals is None:
+            raise ValueError("goals is required")
+        # An attached tab keeps its owner's size unless a viewport is passed; the trace records the size in force.
+        self.viewport = viewport = viewport_size(DEFAULT_VIEWPORT if viewport is None else viewport)
         steps = parse_goals(goals)
         positive_int("expect_timeout_ms", expect_timeout_ms, minimum=0)
         positive_int("max_rejections", max_rejections)
@@ -323,6 +334,7 @@ class Agent:
         try:
             self.browser = Browser(
                 url,
+                target_id=target_id,
                 settle_ms=settle_ms,
                 autocomplete_settle_ms=autocomplete_settle_ms,
                 reveal_timeout_ms=reveal_timeout_ms,
@@ -338,7 +350,7 @@ class Agent:
                 body_cap_ms=body_cap_ms,
                 wait_ignore_attributes=wait_ignore_attributes,
                 wait_interactive_grace_ms=wait_interactive_grace_ms,
-                viewport=viewport,
+                viewport=None if target_id is not None and explicit_viewport is None else viewport,
                 cdp_timeout_ms=cdp_timeout_ms,
                 **({"on_target": self.evidence.attach} if self.evidence else {}),
             )
@@ -346,6 +358,8 @@ class Agent:
             if self.evidence:
                 self.evidence.close()
             raise
+        if target_id is not None and explicit_viewport is None:
+            self.viewport = viewport = self.browser.viewport  # An attached tab keeps its own size.
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
         self.config = dict(
@@ -360,11 +374,11 @@ class Agent:
             wait_interactive_grace_ms=wait_interactive_grace_ms, expect_timeout_ms=expect_timeout_ms,
             max_rejections=max_rejections, auto_complete=auto_complete, require_expectations=require_expectations,
             before_action=before_action is not None, locators=self.locators, evidence_urls=evidence_urls,
-            evidence_capture=evidence_capture, viewport=list(viewport), replay=replay is not None, heal=heal,
+            evidence_capture=evidence_capture, viewport=list(self.viewport), replay=replay is not None, heal=heal,
             screenshots=self.evidence.mode if self.evidence else None,
         )
         try:
-            self.trace_start(url)
+            self.trace_start(url if url is not None else self.browser.evaluate("location.href"))
             page = self.shown(self.browser.observe(screenshot=self.screenshots))
             self.trace_observe(page, important=True)
         except Exception:

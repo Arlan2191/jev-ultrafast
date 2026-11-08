@@ -138,11 +138,13 @@ class Browser:
     wait_ignore_attributes = ()
     tracker = TRACKER
     viewport = DEFAULT_VIEWPORT
+    owns_target = True
 
     def __init__(
         self,
-        url,
+        url=None,
         *,
+        target_id=None,
         settle_ms=50,
         autocomplete_settle_ms=200,
         reveal_timeout_ms=500,
@@ -160,10 +162,17 @@ class Browser:
         wait_ignore_attributes=(),
         wait_interactive_grace_ms=2000,
         on_target=None,
-        viewport=DEFAULT_VIEWPORT,
+        viewport=None,
         cdp_timeout_ms=DEFAULT_CDP_TIMEOUT_MS,
     ):
-        self.viewport = viewport_size(viewport)
+        if url is None and target_id is None:
+            raise ValueError("give a url or target_id")
+        if target_id is not None and (not isinstance(target_id, str) or not target_id):
+            raise ValueError("target_id must be a non-empty string")
+        # An attached tab keeps the size its owner gave it unless a viewport is passed explicitly.
+        self.owns_target = target_id is None
+        self.viewport = viewport_size(DEFAULT_VIEWPORT if viewport is None else viewport)
+        self.override_viewport = self.owns_target or viewport is not None
         self.cdp_timeout_ms = positive("cdp_timeout_ms", cdp_timeout_ms)
         self.wait_quiet_ms = non_negative("wait_quiet_ms", wait_quiet_ms)
         self.wait_timeout_ms = positive("wait_timeout_ms", wait_timeout_ms)
@@ -195,34 +204,58 @@ class Browser:
             new_window = "HeadlessChrome" in f"{self.version.get('product', '')} {self.version.get('userAgent', '')}"
         self.new_window = bool(new_window)
         self.target = None
+        self.session = None
         try:
-            self.target = self.call(
-                "Target.createTarget", session=None, url="about:blank", background=True, newWindow=self.new_window
-            )["targetId"]
+            if self.owns_target:
+                self.target = self.call(
+                    "Target.createTarget", session=None, url="about:blank", background=True, newWindow=self.new_window
+                )["targetId"]
+            else:
+                known = self.call("Target.getTargets", session=None).get("targetInfos", [])
+                if not any(t.get("targetId") == target_id for t in known):
+                    raise ValueError(f"target_id {target_id!r} is not an open target")
+                self.target = target_id
             self.session = self.call("Target.attachToTarget", session=None, targetId=self.target, flatten=True)[
                 "sessionId"
             ]
             if on_target:
                 on_target(self.target)  # Before the first navigation, so the first load is also seen.
-            width, height = self.viewport
-            self.call(
-                "Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=False
-            )
-            # Keep rAF/menus rendering in an owned background tab, without activating the user's Chrome tab.
-            self.call("Emulation.setFocusEmulationEnabled", enabled=True)
+            if self.override_viewport:
+                width, height = self.viewport
+                self.call(
+                    "Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=False
+                )
+            if self.owns_target:
+                # Keep rAF/menus rendering in an owned background tab, without activating the user's Chrome tab.
+                # An attached tab is the caller's: its focus and window are left as they are.
+                self.call("Emulation.setFocusEmulationEnabled", enabled=True)
             # The tracker must exist before the page's own scripts run, so it sees their requests and timers.
             self.call("Page.addScriptToEvaluateOnNewDocument", source=self.tracker)
-            self.call("Page.navigate", url=url)
+            if self.owns_target or url is not None:
+                self.call("Page.navigate", url=url)
+            else:
+                # The page is already loaded: install the tracker on this document too (idempotent).
+                self.evaluate(self.tracker)
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 if self.evaluate("document.readyState") == "complete":
                     break
                 time.sleep(0.02)
+            if not self.override_viewport:
+                self.viewport = self.measured_viewport()
             self.mark_activity()
         except BaseException:
             with contextlib.suppress(Exception):
-                self.close()  # Do not leak the owned tab when setup fails.
+                self.close()  # Do not leak the owned tab (or the session on a caller's tab) when setup fails.
             raise
+
+    def measured_viewport(self):
+        """The size the caller gave an attached tab (used for the wheel point); the default when it cannot be read."""
+        size = self.evaluate("[innerWidth, innerHeight]")
+        try:
+            return viewport_size(size)
+        except ValueError:
+            return self.viewport
 
     def call(self, method, session=False, **params):
         """One CDP call on this browser's session (session=None: the browser itself) with the per-call timeout."""
@@ -623,7 +656,11 @@ class Browser:
             # Cleared before the call and never retried, by design: a close that timed out may hang again, and a
             # second close() must not send closeTarget twice.
             target, self.target = self.target, None
-            self.call("Target.closeTarget", session=None, targetId=target)
+            if self.owns_target:
+                self.call("Target.closeTarget", session=None, targetId=target)
+            elif self.session:
+                # A tab the agent did not create is only detached, never closed.
+                self.call("Target.detachFromTarget", session=None, sessionId=self.session)
 
 
 def fingerprint(state):

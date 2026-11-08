@@ -23,7 +23,11 @@ def install(monkeypatch, infos=TABS):
 
     monkeypatch.setattr(browser_module, "ensure_daemon", lambda: None)
     monkeypatch.setattr(browser_module, "cdp", cdp)
-    monkeypatch.setattr(Browser, "evaluate", lambda self, expression: "complete")
+    def evaluate(self, expression):
+        calls.append(("evaluate", {"expression": expression}))
+        return "complete"
+
+    monkeypatch.setattr(Browser, "evaluate", evaluate)
     monkeypatch.setattr(Browser, "activity", lambda self: None)
     return calls
 
@@ -59,7 +63,7 @@ def test_the_tracker_is_installed_on_the_existing_document_too(monkeypatch):
     calls = install(monkeypatch)
     Browser(target_id="mine")
     assert "Page.addScriptToEvaluateOnNewDocument" in methods(calls)
-    evaluated = [p["expression"] for m, p in calls if m == "Runtime.evaluate"]
+    evaluated = [p["expression"] for m, p in calls if m == "evaluate"]
     assert any("__jevWait" in e for e in evaluated)
 
 
