@@ -205,8 +205,11 @@ def test_body_overflow_counts_only_when_it_propagates_to_the_viewport(page):
     # html visible: body's overflow propagates to the viewport.
     page.browser.evaluate("document.body.style.overflowX = 'hidden'")
     met(page, expect.no_horizontal_scroll())
-    # html overflow-y:auto makes html's own overflow non-visible, so body's no longer reaches the viewport.
+    # html overflow-y:auto makes html's own overflow non-visible, so body's does not propagate. Body then clips its own
+    # box and the viewport does not scroll sideways.
     page.browser.evaluate("document.documentElement.style.overflowY = 'auto'")
-    unmet(page, expect.no_horizontal_scroll(), "horizontal")
+    met(page, expect.no_horizontal_scroll())
     page.browser.evaluate("document.documentElement.style.overflowY = ''")
+    # Nothing clips: the wide child really scrolls the viewport.
     page.browser.evaluate("document.body.style.overflowX = ''")
+    unmet(page, expect.no_horizontal_scroll(), "horizontal")

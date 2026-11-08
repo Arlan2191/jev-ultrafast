@@ -289,7 +289,9 @@
         const clipsX = e => ['hidden', 'clip'].includes(getComputedStyle(e).overflowX);
         const viewportX = getComputedStyle(root).overflowX === 'visible' && document.body ? document.body : root;
         if (clipsX(viewportX)) return null;
-        const width = Math.max(root.scrollWidth, document.body?.scrollWidth ?? 0);
+        // A body that clips without propagating hides its own overflow; only html's scrollWidth can scroll the viewport.
+        const bodyClips = document.body && clipsX(document.body);
+        const width = bodyClips ? root.scrollWidth : Math.max(root.scrollWidth, document.body?.scrollWidth ?? 0);
         return width <= root.clientWidth + 1 ? null : 'the page scrolls horizontally (' + width + ' px of content in ' + root.clientWidth + ' px)';
       }
       let all;
