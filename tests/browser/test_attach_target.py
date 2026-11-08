@@ -3,6 +3,7 @@
 import os
 
 import pytest
+from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import cdp
 
 from jev_ultrafast import Agent
@@ -31,6 +32,7 @@ def owned_tab(fixture_base_url):
         if os.environ.get("JEV_REQUIRE_BROWSER") == "1":
             pytest.fail(message)
         pytest.skip(message)
+    ensure_daemon()
     target = cdp("Target.createTarget", session_id=None, url=f"{fixture_base_url}/keys_enter.html")["targetId"]
     yield target
     try:
