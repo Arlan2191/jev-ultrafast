@@ -798,3 +798,53 @@ def test_a_test_id_moved_onto_a_same_name_look_alike_is_a_refusal_that_heals(lab
     again.close()
     heal = next(e for e in load_trace(lab.trace(again)) if e["type"] == "heal")
     assert heal["cause"] == "ambiguous"
+
+
+# --- step goal parameters ---------------------------------------------------------------------------------------
+
+TARGET_OPEN = "window.__jevFast.ids.get(document.querySelector('[data-row=target] button'))"
+
+
+def test_a_replay_with_another_param_value_on_a_page_with_another_row_name_is_free(lab):
+    goal = "Open the order titled {title}"
+    chooser = pick_chooser(
+        lambda page, c: next(a["id"] for a in page["actions"] if a.get("node") == c.agent.browser.evaluate(TARGET_OPEN))
+    )
+
+    def steps_for(title):
+        return [Step(goal, expect=expect.text("Opened row target"), params={"title": title})]
+
+    agent, state, _model, _wall = lab.run(
+        url="replay_params.html?name=Order%20A", goals=steps_for("Order A"), chooser=chooser
+    )
+    assert state["status"] == "done" and state["verified"] and lab.clicked(agent) == ["target"]
+    assert chooser.calls == ["Open the order titled Order A"]
+    agent.close()
+
+    chooser.forbid = True
+    again, replayed, _model, _wall = lab.run(
+        url="replay_params.html?name=Order%20B", goals=steps_for("Order B"), chooser=chooser, replay=lab.trace(agent)
+    )
+    assert replayed["status"] == "done" and replayed["verified"] is True, replayed["stop_reason"]
+    assert chooser.calls == [] and replayed["decisions"] == [] and replayed["text_calls"] == []
+    assert sources(replayed) == ["replay"] and lab.clicked(again) == ["target"]
+    assert replayed["replay"]["model_calls"] == 0 and replayed["replay"]["steps_healed"] == 0
+    again.close()
+    assert load_trace(lab.trace(again))[-1]["totals"]["jev_calls"] == 0
+
+
+def test_a_changed_goal_template_is_a_replay_mismatch_even_with_the_same_param_value(lab):
+    chooser = pick_chooser(
+        lambda page, c: next(a["id"] for a in page["actions"] if a.get("node") == c.agent.browser.evaluate(TARGET_OPEN))
+    )
+    check = expect.text("Opened row target")
+    recorded = [Step("Open the order titled {title}", expect=check, params={"title": "Order A"})]
+    agent, state, _model, _wall = lab.run(url="replay_params.html?name=Order%20A", goals=recorded, chooser=chooser)
+    assert state["status"] == "done"
+    agent.close()
+
+    chooser.forbid = True
+    changed = [Step("Open the order called {title}", expect=check, params={"title": "Order A"})]
+    with pytest.raises(ValueError, match="replay_mismatch.*step 1 goal"):
+        lab.run(url="replay_params.html?name=Order%20A", goals=changed, chooser=chooser, replay=lab.trace(agent))
+    assert chooser.calls == []
