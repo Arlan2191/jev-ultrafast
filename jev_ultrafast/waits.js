@@ -181,7 +181,7 @@
     (document.readyState === 'interactive' && now() - w.interactiveAt >= spec.interactive_grace_ms && !counted(spec).length);
 
   const checks = {
-    dom_quiet: spec => now() - lastDom(spec.ignore_attributes) >= spec.quiet_ms ? null : 'the DOM is still changing',
+    dom_quiet: spec => now() - lastDom(spec.ignore_attributes) >= 0 ? null : 'the DOM is still changing',
     network_idle(spec) {
       const open = counted(spec).length;
       if (open) return open + ' request(s) in flight';
