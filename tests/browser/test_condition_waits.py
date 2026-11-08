@@ -326,7 +326,9 @@ def test_the_start_of_a_new_document_is_not_counted_as_a_recent_request(open_pag
 
 ANIMATE = (
     "const bar = document.createElement('div'); document.body.append(bar); let n = 0;"
-    " const timer = setInterval(() => { bar.style.width = (++n) + 'px'; if (n >= 100) clearInterval(timer); }, 20); 1"
+    " window.__animating = true;"
+    " const timer = setInterval(() => { bar.style.width = (++n) + 'px';"
+    " if (n >= 200) { clearInterval(timer); window.__animating = false; } }, 20); 1"
 )
 
 
@@ -340,7 +342,10 @@ def test_attribute_noise_keeps_the_dom_busy_unless_the_attribute_is_ignored(star
         f"style animation: default met={busy.met} in {busy.waited_ms} ms; "
         f"style ignored met={ignored.met} in {ignored.waited_ms} ms"
     )
-    assert busy.met is False and ignored.met is True and ignored.waited_ms < 500
+    assert busy.met is False and ignored.met is True
+    # Evidence, not a clock: the ignored wait was met while the attribute noise was still running.
+    assert agent.browser.evaluate("window.__animating") is True
+    assert ignored.waited_ms < 650  # Hang guard only (timeout is 700).
 
 
 def test_the_agent_level_ignored_attributes_apply_to_settled(start):
