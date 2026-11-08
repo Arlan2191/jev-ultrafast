@@ -6,7 +6,8 @@
      beside it is always titled "Other ...". By default the rows are real list items (a locator scope named by the row's
      first text, the case a varying title hits); ?plain=1 builds plain divs, which are no scope. The target's Open button
      carries the test id, or the decoy's when ?moved=1. Opening a row prints "Opened <its title>"; window.__clicked lists
-     the opened rows. -->
+     the opened rows. ?byid=1 gives the target's button a stable id
+     (id=open-target) instead of the test id. -->
 <main>
   <h1>Orders</h1>
   <div id="orders"></div>
@@ -31,7 +32,8 @@
     const open = document.createElement("button");
     open.type = "button";
     open.textContent = "Open";
-    if (row.id === testId) open.dataset.testid = "open-row";
+    if (query.has("byid")) { if (row.id === "target") open.id = "open-target"; }
+    else if (row.id === testId) open.dataset.testid = "open-row";
     open.onclick = () => {
       window.__clicked.push(row.id);
       document.getElementById("opened").textContent = "Opened " + row.title;

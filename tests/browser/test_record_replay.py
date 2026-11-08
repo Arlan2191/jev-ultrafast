@@ -856,6 +856,18 @@ def test_a_test_id_on_a_row_named_by_neither_value_is_not_acted_on(lab):
     assert lab.clicked(again) == [] and chooser.calls == [] and sources(replayed) == []
 
 
+def test_a_stable_id_on_a_row_named_by_neither_value_is_not_acted_on(lab):
+    chooser = target_chooser()
+    agent = record_order_a(lab, chooser, "replay_params.html?byid=1&")
+    # No row is titled "Order B"; row A still holds the recorded id. The id fallback must not click it.
+    again, replayed, _model, _wall = lab.run(
+        url="replay_params.html?byid=1&name=Order%20A", goals=title_steps("Order B"), chooser=chooser,
+        replay=lab.trace(agent), heal=False,
+    )
+    assert replayed["status"] == "diverged" and replayed["verified"] is not True
+    assert lab.clicked(again) == [] and chooser.calls == [] and sources(replayed) == []
+
+
 def test_a_test_id_on_a_row_that_does_not_carry_the_param_fails_the_param_check(lab):
     chooser = target_chooser()
     agent, state, _model, _wall = lab.run(

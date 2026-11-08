@@ -149,3 +149,34 @@ def test_a_param_value_cannot_hold_a_declared_secret():
     secret = "hunter2-correct-horse"
     with pytest.raises(ValueError, match="secret"):
         Step("Open {title}", values={"pw": Value(secret, secret=True)}, params={"title": f"x {secret}"})
+
+
+def scoped(name):
+    return {"tag": "button", "scope": {"role": "listitem", "name": name, "count": 1, "ordinal": 0}}
+
+
+def test_two_params_with_the_same_value_leave_the_scope_literal():
+    from jev_ultrafast.replay import parametrize
+
+    locator = scoped("X")
+    assert parametrize(locator, {"b": "X", "a": "X"}) == locator
+    assert parametrize(locator, {"b": "Y", "a": "X"})["scope"]["param"] == "a"
+
+
+def test_a_value_longer_than_the_clip_is_never_bound():
+    from jev_ultrafast.replay import clip, parametrize
+
+    long_a, long_b = "x" * 80 + "A", "x" * 80 + "B"
+    locator = scoped(clip(long_a))
+    assert clip(long_a) == clip(long_b)
+    assert parametrize(locator, {"t": long_a}) == locator
+    exact = "y" * 80
+    assert parametrize(scoped(exact), {"t": exact})["scope"]["param"] == "t"
+
+
+def test_a_value_outside_the_bmp_is_never_bound():
+    from jev_ultrafast.replay import parametrize
+
+    locator = scoped("\U0001f600 ok")
+    assert parametrize(locator, {"t": "\U0001f600 ok"}) == locator
+    assert parametrize(scoped("caf\u00e9"), {"t": "caf\u00e9"})["scope"]["param"] == "t"

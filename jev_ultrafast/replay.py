@@ -33,14 +33,24 @@ def clip(text):
 
 def parametrize(locator, params):
     """The locator to record: when its scope NAME is the page's rendering of a step param value, the scope keeps the
-    param's name (`param`) and a `{name}` placeholder, never the raw value. Other locators are returned unchanged."""
+    param's name (`param`) and a `{name}` placeholder, never the raw value. Other locators are returned unchanged.
+
+    Binding is by equality of text, not intent: an unrelated row whose name happens to equal a param value is bound
+    too, and a replay with another value looks for a row of that other name. The scope stays literal (and heals on a
+    changed name) when more than one param has the value, when the value does not fit the 80-unit clip whole, or when
+    it holds a character outside the BMP (Python clips by code point, the page by UTF-16 unit; equal only there)."""
     scope = (locator or {}).get("scope")
     if not params or not isinstance(scope, dict) or not isinstance(scope.get("name"), str):
         return locator
-    for name, value in sorted(params.items()):
-        if scope["name"] == clip(value):
-            return {**locator, "scope": {**scope, "name": f"{{{name}}}", "param": name}}
-    return locator
+    names = [name for name, value in sorted(params.items()) if _bindable(value) and scope["name"] == clip(value)]
+    if len(names) != 1:
+        return locator
+    return {**locator, "scope": {**scope, "name": f"{{{names[0]}}}", "param": names[0]}}
+
+
+def _bindable(value):
+    text = normalise(value)
+    return len(text) <= 80 and all(ord(c) < 0x10000 for c in text)
 
 
 def bind(locator, params):
