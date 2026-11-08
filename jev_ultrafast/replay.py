@@ -18,7 +18,7 @@ SECRET_MARK = "<secret:"
 OPERATIONS = {
     "click": "CLICK", "fill": "TYPE_TEXT", "select": "SELECT", "hover": "HOVER", "key": "PRESS_KEY", "goto": "GOTO",
 }
-ACCEPTED_RULES = {"role_name_scope", "test_id_first", "id"}
+ACCEPTED_RULES = {"role_name_scope", "test_id_first", "id", "unique_in_document"}
 FOCUS_FIELDS = ("role", "label", "tag", "type")
 
 
