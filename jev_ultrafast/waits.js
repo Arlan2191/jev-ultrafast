@@ -168,6 +168,54 @@
   };
   const pageText = () => document.body?.innerText ?? '';
 
+  // Locators for `expect` checks: every element the described locator matches, in document order, hidden ones included.
+  const squash = text => (text || '').replace(/\s+/g, ' ').trim();
+  const same = (have, want, exact) => exact ? squash(have) === squash(want) : squash(have).toLowerCase().includes(squash(want).toLowerCase());
+  const IMPLIED = {H1: 'heading', H2: 'heading', H3: 'heading', H4: 'heading', H5: 'heading', H6: 'heading', IMG: 'img',
+    UL: 'list', OL: 'list', LI: 'listitem', NAV: 'navigation', MAIN: 'main', DIALOG: 'dialog', FORM: 'form',
+    TABLE: 'table', TR: 'row', TD: 'cell', TH: 'columnheader', ARTICLE: 'article', ASIDE: 'complementary'};
+  const roleOf = e => (e.getAttribute('role') || '').trim().split(/\s+/)[0] || role(e) || IMPLIED[e.tagName] || null;
+  const labelsOf = e => {
+    const found = [];
+    const by = (e.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+      .map(id => document.getElementById(id)).filter(Boolean).map(l => l.textContent);
+    if (by.length) found.push(by.join(' '));
+    if (e.getAttribute('aria-label')) found.push(e.getAttribute('aria-label'));
+    for (const l of e.labels || []) found.push(name(l));
+    return found;
+  };
+  const textOfEl = e => e.innerText || e.textContent || '';
+  const locate = loc => {
+    let pool;
+    if (loc.css) {
+      try { pool = [...document.querySelectorAll(loc.css)]; } catch { throw new Error('invalid css selector: ' + loc.css); }
+    } else pool = [...document.querySelectorAll('body *')].filter(e => !e.closest('script,style,template,noscript'));
+    if (loc.within) {
+      const parents = locate(loc.within);
+      pool = pool.filter(e => parents.some(p => p !== e && p.contains(e)));
+    }
+    if (loc.role) {
+      pool = pool.filter(e => roleOf(e) === loc.role && (loc.name === undefined || same(name(e), loc.name, loc.exact)));
+    }
+    if (loc.test_id !== undefined) {
+      const attribute = loc.test_id_attribute || 'data-testid';
+      pool = pool.filter(e => e.getAttribute(attribute) === loc.test_id);
+    }
+    if (loc.label !== undefined) pool = pool.filter(e => labelsOf(e).some(l => same(l, loc.label, loc.exact)));
+    if (loc.text !== undefined) {
+      const hits = pool.filter(e => same(textOfEl(e), loc.text, loc.exact));
+      const outer = new Set();
+      for (const e of hits) for (let a = e.parentElement; a; a = a.parentElement) outer.add(a);
+      pool = hits.filter(e => !outer.has(e)); // The smallest element that has the text, not every ancestor.
+    }
+    return loc.nth === undefined ? pool : pool.slice(loc.nth, loc.nth + 1);
+  };
+  const deepActive = () => {
+    let active = document.activeElement;
+    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+    return active;
+  };
+
   const counted = spec => { const skip = ignored(spec); return [...w.inflight.values()].filter(open => !skip(open.url)); };
   // Pending timers of at most timer_ms (0 turns timer counting off) armed after `since`, in the epoch it belongs to.
   const shortTimers = (spec, since) => spec.timer_ms > 0
@@ -203,6 +251,33 @@
       const found = contains(spec.contains)(pageText());
       return found === spec.present ? null : spec.present ? 'the text is not on the page' : 'the text is still on the page';
     },
+    locator(spec) {
+      if (spec.op === 'no_hscroll') {
+        const root = document.documentElement, width = Math.max(root.scrollWidth, document.body?.scrollWidth ?? 0);
+        return width <= root.clientWidth + 1 ? null : 'the page scrolls horizontally (' + width + ' px of content in ' + root.clientWidth + ' px)';
+      }
+      let all;
+      try { all = locate(spec.locator); } catch (error) { return error.message; }
+      const shownOnes = all.filter(visible);
+      if (spec.op === 'visible') return shownOnes.length ? null : all.length ? all.length + ' match(es), none visible' : 'no matching element';
+      if (spec.op === 'hidden') return shownOnes.length ? shownOnes.length + ' visible match(es)' : null;
+      if (spec.op === 'count') {
+        const n = spec.visible_only ? shownOnes.length : all.length;
+        const bad = [['eq', n === spec.eq], ['gte', n >= spec.gte], ['lte', n <= spec.lte]]
+          .filter(([key, ok]) => spec[key] != null && !ok).map(([key]) => key + ' ' + spec[key]);
+        return bad.length ? 'count is ' + n + ', not ' + bad.join(' and ') : null;
+      }
+      if (!all.length) return 'no matching element';
+      if (all.length > 1) return 'ambiguous: ' + all.length + ' matches';
+      const [e] = all;
+      if (spec.op === 'focused') return deepActive() === e ? null : 'the element does not have focus';
+      const text = squash(textOfEl(e));
+      const clip = text.length > 120 ? text.slice(0, 120) + '...' : text;
+      if (spec.equals != null && text !== squash(spec.equals)) return 'text is "' + clip + '"';
+      if (spec.contains != null && !text.includes(squash(spec.contains))) return 'text is "' + clip + '"';
+      if (spec.not_contains != null && text.includes(squash(spec.not_contains))) return 'text contains it: "' + clip + '"';
+      return null;
+    },
     text_stable(spec) {
       let text;
       if (spec.role || spec.name) { const e = find(spec); text = e ? e.innerText ?? e.textContent : null; }
@@ -220,7 +295,7 @@
   };
   // element, text and text_stable scan the document: poll them at four times what one check costs (50 to 250 ms), so
   // waiting does not compete with the page being waited on. The others are O(1) and polled every 15 ms.
-  const HEAVY = new Set(['element', 'text', 'text_stable']);
+  const HEAVY = new Set(['element', 'text', 'text_stable', 'locator']);
 
   w.timeout = nativeSet;
   // Counters for the post-action trigger: counted requests in flight, requests started after `since` (same epoch),
