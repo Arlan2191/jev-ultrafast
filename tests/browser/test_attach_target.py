@@ -41,15 +41,41 @@ def owned_tab(fixture_base_url):
         pass
 
 
-def test_a_step_runs_on_the_callers_tab_and_leaves_it_open(owned_tab, monkeypatch):
+def test_a_step_runs_on_the_callers_tab_and_leaves_it_open(owned_tab, monkeypatch, tmp_path):
     stub(monkeypatch, "key:Enter")
     before = page_targets()
     assert owned_tab in before
-    agent = Agent(goals="Submit the form", target_id=owned_tab, max_steps=1)
+    run = tmp_path / "ev"
+    agent = Agent(goals="Submit the form", target_id=owned_tab, evidence_dir=run, max_steps=1)
     try:
         list(agent.run())
         assert agent.browser.evaluate("window.submitted") == "a book"
         assert page_targets() == before
+        # The size the caller gave the page is measured, not overridden.
+        assert agent.browser.viewport == tuple(agent.browser.evaluate("[innerWidth, innerHeight]"))
     finally:
         agent.close()
+    assert page_targets() == before
+    assert (run / "trace.jsonl").stat().st_size > 0
+    assert list((run / "screenshots").glob("*.jpg"))
+
+
+def test_a_second_agent_attaches_to_the_same_tab_after_the_first_closed(owned_tab, monkeypatch):
+    stub(monkeypatch, "key:Enter")
+    before = page_targets()
+    first = Agent(goals="Submit the form", target_id=owned_tab, max_steps=1)
+    try:
+        list(first.run())
+    finally:
+        first.close()
+    assert page_targets() == before
+    second = Agent(goals="Submit the form", target_id=owned_tab, max_steps=1)
+    try:
+        assert page_targets() == before
+        # The tracker is installed once and still answers waits (the second attach re-evaluated it).
+        assert second.browser.evaluate("!!window.__jevWait") is True
+        assert second.wait_for("dom_quiet", quiet_ms=100, timeout_ms=5000).met is True
+        assert second.wait_for("network_idle", idle_ms=100, timeout_ms=5000).met is True
+    finally:
+        second.close()
     assert page_targets() == before

@@ -5,12 +5,12 @@ import pytest
 from jev_ultrafast import agent as loop
 from jev_ultrafast import browser as browser_module
 from jev_ultrafast.agent import Agent
-from jev_ultrafast.browser import Browser
+from jev_ultrafast.browser import DEFAULT_VIEWPORT, Browser
 
 TABS = {"targetInfos": [{"targetId": "mine", "type": "page"}, {"targetId": "other", "type": "page"}]}
 
 
-def install(monkeypatch, infos=TABS):
+def install(monkeypatch, infos=TABS, measured=None):
     calls = []
 
     def cdp(method, **params):
@@ -23,9 +23,10 @@ def install(monkeypatch, infos=TABS):
 
     monkeypatch.setattr(browser_module, "ensure_daemon", lambda: None)
     monkeypatch.setattr(browser_module, "cdp", cdp)
+
     def evaluate(self, expression):
         calls.append(("evaluate", {"expression": expression}))
-        return "complete"
+        return measured if "innerWidth" in expression else "complete"
 
     monkeypatch.setattr(Browser, "evaluate", evaluate)
     monkeypatch.setattr(Browser, "activity", lambda self: None)
@@ -131,3 +132,20 @@ def test_the_agent_requires_a_url_or_a_target_id(monkeypatch):
     with pytest.raises(ValueError, match="url or target_id"):
         Agent(goals="goal")
     assert opened == []
+
+
+def test_the_attached_tabs_own_size_is_measured(monkeypatch):
+    install(monkeypatch, measured=[800, 600])
+    assert Browser(target_id="mine").viewport == (800, 600)
+
+
+def test_an_unreadable_size_keeps_the_default(monkeypatch):
+    install(monkeypatch, measured=[800.5, 600])
+    assert Browser(target_id="mine").viewport == DEFAULT_VIEWPORT
+
+
+def test_a_target_that_is_not_a_page_is_rejected(monkeypatch):
+    calls = install(monkeypatch, infos={"targetInfos": [{"targetId": "sw", "type": "service_worker"}]})
+    with pytest.raises(ValueError, match="service_worker target, not a page"):
+        Browser(target_id="sw")
+    assert "Target.attachToTarget" not in methods(calls)

@@ -106,7 +106,7 @@ with Agent(goals="Open the billing settings", target_id=target_id) as agent:
         pass
 ```
 
-With `target_id` the agent attaches a session to that tab and does not create a target, navigate, or change the viewport (pass `viewport=` to set one). Pass `url` as well to navigate the attached tab first. Snapshots, waits, evidence capture and replay work as usual. `close()` only detaches: the tab stays open. `new_window` and focus emulation apply only to tabs the agent creates. An unknown `target_id` raises `ValueError`; with neither `url` nor `target_id`, so does construction.
+With `target_id` the agent attaches a session to that tab and does not create a target, navigate, or change the viewport (pass `viewport=` to set one). Pass `url` as well to navigate the attached tab first. Snapshots, waits, evidence capture and replay work as usual. `close()` only detaches: the tab stays open. The waits tracker (timer and fetch/XHR wrappers) stays in that page after `close()`; it is idempotent, so a later agent on the same tab reuses it. `new_window` and focus emulation apply only to tabs the agent creates. An unknown `target_id` raises `ValueError`; with neither `url` nor `target_id`, so does construction.
 
 ### Keys and navigation
 

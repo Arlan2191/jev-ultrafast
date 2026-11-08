@@ -212,8 +212,11 @@ class Browser:
                 )["targetId"]
             else:
                 known = self.call("Target.getTargets", session=None).get("targetInfos", [])
-                if not any(t.get("targetId") == target_id for t in known):
+                found = next((t for t in known if t.get("targetId") == target_id), None)
+                if found is None:
                     raise ValueError(f"target_id {target_id!r} is not an open target")
+                if found.get("type", "page") != "page":
+                    raise ValueError(f"target_id {target_id!r} is a {found['type']} target, not a page")
                 self.target = target_id
             self.session = self.call("Target.attachToTarget", session=None, targetId=self.target, flatten=True)[
                 "sessionId"
@@ -255,6 +258,8 @@ class Browser:
         try:
             return viewport_size(size)
         except ValueError:
+            # Fractional, zero or oversized sizes are not valid viewports: keep the default (only the wheel point
+            # depends on it, and it stays inside the page).
             return self.viewport
 
     def call(self, method, session=False, **params):
