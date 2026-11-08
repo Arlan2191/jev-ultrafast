@@ -26,6 +26,35 @@ def normalise(text):
     return " ".join(str(text).split())
 
 
+def clip(text):
+    """The scope name the page would show for this text (a11y.js clip: whitespace collapsed, 80 characters)."""
+    return normalise(text)[:80]
+
+
+def parametrize(locator, params):
+    """The locator to record: when its scope NAME is the page's rendering of a step param value, the scope keeps the
+    param's name (`param`) and a `{name}` placeholder, never the raw value. Other locators are returned unchanged."""
+    scope = (locator or {}).get("scope")
+    if not params or not isinstance(scope, dict) or not isinstance(scope.get("name"), str):
+        return locator
+    for name, value in sorted(params.items()):
+        if scope["name"] == clip(value):
+            return {**locator, "scope": {**scope, "name": f"{{{name}}}", "param": name}}
+    return locator
+
+
+def bind(locator, params):
+    """The locator to resolve now: a scope recorded by param name takes this run's value of that param. None when the
+    run has no such param (a trace edited by hand); other locators are returned unchanged."""
+    scope = (locator or {}).get("scope")
+    if not isinstance(scope, dict) or "param" not in scope:
+        return locator
+    value = (params or {}).get(scope["param"])
+    if not isinstance(value, str):
+        return None
+    return {**locator, "scope": {**{k: v for k, v in scope.items() if k != "param"}, "name": clip(value)}}
+
+
 @dataclass(frozen=True)
 class Planned:
     """One executed action of the recorded run, as far as a replay needs it."""

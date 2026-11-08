@@ -3,8 +3,9 @@
 import html
 import json
 import string
+import unicodedata
 import urllib.parse
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from .expect import Expectation
 from .questions import GENERATE, NONE  # NONE: "no declared value fits", offered when values but no text helper exist.
@@ -56,10 +57,12 @@ class Value:
 class Step:
     """One goal. `expect` checks (see jev_ultrafast.expect) decide whether it is done; `values` override the agent's.
 
-    `params={name: str}` fills `{name}` placeholders in the goal and in the check descriptions (str.format style,
-    `{{` and `}}` for literal braces) with text that only exists in this run. `goal` and the check descriptions are
+    `params={name: str}` fills `{name}` placeholders in the goal and in the string inputs of the checks (`contains`,
+    `name`, `url`; a compiled regex stays literal) or the description of an `expect.check` (str.format style, `{{` and
+    `}}` for literal braces) with text that only exists in this run. `goal`, the check inputs and the descriptions are
     the RENDERED text, which is all the model, the evidence and the hook see; `template` and `check_templates` keep
-    the placeholders, and a replay compares those, never the param values. Without `params` the goal is literal."""
+    the placeholders, and a replay compares those, never the param values. Without `params` (or with an empty dict)
+    the goal and the checks are literal. `param_checked` is True when some check uses a param."""
 
     goal: str
     expect: tuple = ()
@@ -67,6 +70,7 @@ class Step:
     params: dict | None = None
     template: str = field(default="", init=False, compare=False)
     check_templates: tuple = field(default=(), init=False, compare=False)
+    param_checked: bool = field(default=False, init=False, compare=False)
 
     def __post_init__(self):
         if not isinstance(self.goal, str) or not self.goal.strip():
@@ -78,12 +82,19 @@ class Step:
         params = validate_params(self.params, values)
         template = self.goal.strip()
         templates = tuple(e.description for e in expect)
+        checked = False
         if params is not None:
             used = set()
             goal = render(template, params, used)
-            expect = tuple(replace(e, description=render(e.description, params, used)) for e in expect)
+            rendered = []
+            for e in expect:
+                found = set()
+                rendered.append(e.render(params, found))
+                used |= found
+                checked = checked or bool(found)
+            expect = tuple(rendered)
             if unused := sorted(set(params) - used):
-                raise ValueError(f"Step params {', '.join(unused)} are unused by the goal and the check descriptions")
+                raise ValueError(f"Step params {', '.join(unused)} are unused by the goal and the checks")
             forms = [f for v in values.values() if v.secret for f in secret_forms(v.text)]
             if any(form in text for text in params.values() for form in forms):
                 raise ValueError("A step param contains a declared secret value; params are shown to the model")
@@ -95,21 +106,27 @@ class Step:
         object.__setattr__(self, "params", params or {})
         object.__setattr__(self, "template", template)
         object.__setattr__(self, "check_templates", templates)
+        object.__setattr__(self, "param_checked", checked)
 
 
 def validate_params(params, values):
-    """None (no params: the goal is literal) or {name: non-empty str}. Params are data shown to the model."""
+    """None (no params, or an empty dict: the goal is literal) or {name: single-line text}. Params are data shown to
+    the model as part of its instruction."""
     if params is None:
         return None
     if not isinstance(params, dict):
         raise ValueError("params must be a dict of name -> str")
+    if not params:
+        return None
     for name, text in params.items():
         if not (isinstance(name, str) and name.isidentifier() and len(name) <= 64):
             raise ValueError("A param name must be a plain identifier of at most 64 characters")
         if name in values:
             raise ValueError(f"Param {name!r} is named like a declared value; a name is one or the other")
-        if not isinstance(text, str) or not text or len(text) > MAX_TEXT:
-            raise ValueError(f"Param {name!r} must be a non-empty string of at most {MAX_TEXT} characters")
+        if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
+            raise ValueError(f"Param {name!r} must be a string with text, of at most {MAX_TEXT} characters")
+        if any(unicodedata.category(c)[0] == "C" or unicodedata.category(c) in {"Zl", "Zp"} for c in text):
+            raise ValueError(f"Param {name!r} must be one line without control characters")
     return dict(params)
 
 
