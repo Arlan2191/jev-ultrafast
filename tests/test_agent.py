@@ -528,6 +528,7 @@ def test_zero_settle_is_accepted(monkeypatch):
         "wait_interactive_grace_ms": 2000,
         "viewport": (1120, 780),
         "cdp_timeout_ms": 15000,
+        "target_id": None,
     }
 
 
