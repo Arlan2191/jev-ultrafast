@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><title>Expect locators</title>
+<style>.badge{color:#444}.gone{display:none}.invisible{visibility:hidden}#wide{display:none;width:3000px;height:10px}</style>
+</head>
+<body>
+<header>Site banner</header>
+<main>
+  <h1>Orders</h1>
+  <button data-testid="save">Save draft</button>
+  <button data-cy="alt-save">Save copy</button>
+  <p>Order #42 shipped</p>
+  <p class="badge">New</p>
+  <p class="gone">Ghost text</p>
+  <p class="invisible">Hidden text</p>
+
+  <form>
+    <label for="email">Email address</label><input id="email">
+    <input id="phone" aria-labelledby="lbl-phone"><span id="lbl-phone">Phone number</span>
+    <label>Nickname <input id="nick"></label>
+    <input id="search" aria-label="Search site">
+    <input id="other" aria-label="Other">
+  </form>
+
+  <section aria-label="Cart">
+    <ul>
+      <li><span>Pen</span> <button>Remove</button></li>
+      <li><span>Ink</span> <button>Remove</button></li>
+    </ul>
+  </section>
+  <section aria-label="Wishlist">
+    <ul><li><span>Desk</span> <button>Remove</button></li></ul>
+  </section>
+  <div class="gone" id="panel"><button>Remove</button></div>
+  <div aria-hidden="true" id="aria-panel"><button>Remove</button></div>
+  <div id="mixed">Shown <span class="invisible">tucked away</span></div>
+  <section aria-label="Notes"><a>no link</a><a href="#x">a link</a></section>
+  <p id="long">  Total:
+     12   items  </p>
+  <article><header>Article head</header><footer>Article foot</footer></article>
+  <div id="scripted">Visible <script>var x = "secret-script-text";</script><style>.x::before{content:"secret-style-text"}</style></div>
+  <div id="wide"></div>
+</main>
+<footer>Site footer</footer>
+</body>
+</html>

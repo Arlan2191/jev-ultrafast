@@ -616,6 +616,9 @@ class Browser:
             "element", role=role, name=pattern("name", name, optional=True), state=element_state(state), present=present
         )
 
+    def locator_spec(self, op, locator=None, **fields):
+        return self._spec("locator", op=op, locator=locator.as_dict() if locator is not None else None, **fields)
+
     def text_spec(self, contains, present):
         if type(present) is not bool:
             raise ValueError("present must be a boolean")
@@ -635,8 +638,8 @@ class Browser:
     def probe(self, kind, timeout_ms=0, **args):
         """An element or text condition for a step's checks: like element() / text(), but timeout_ms may be 0, which
         reads the page once and returns at once."""
-        spec = (self.element_spec if kind == "element" else self.text_spec)(**args)
-        return self._wait(spec, non_negative("timeout_ms", timeout_ms))
+        specs = {"element": self.element_spec, "text": self.text_spec, "locator": self.locator_spec}
+        return self._wait(specs[kind](**args), non_negative("timeout_ms", timeout_ms))
 
     def text_stable(self, quiet_ms=500, role=None, name=None, timeout_ms=30000, require_text=None):
         """The visible text of the whole page, or of the element matched by role and name, is unchanged for quiet_ms.

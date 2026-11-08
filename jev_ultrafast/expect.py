@@ -18,6 +18,7 @@ import re
 import time
 from dataclasses import dataclass, field, replace
 
+from .locator import Locator
 from .waits import WaitResult, element_state, non_negative, pattern
 
 POLL_S = 0.05
@@ -42,6 +43,31 @@ def describe_of(kind, args):
     parts += [describe(args["name"])] if args["name"] is not None else []
     parts += [f"{key}={str(want).lower()}" for key, want in (args["state"] or {}).items()]
     return f"{'element' if args['present'] else 'no element'} {' '.join(parts)}"
+
+
+def describe_locator(args):
+    """The description of a check built on a Locator, from its (possibly rendered) inputs."""
+    op, loc = args["op"], args.get("locator")
+    if op == "no_hscroll":
+        return "page has no horizontal scroll"
+    if op == "count":
+        bounds = [
+            f"{sign} {args[key]}"
+            for key, sign in (("eq", "=="), ("gte", ">="), ("lte", "<="))
+            if args.get(key) is not None
+        ]
+        scope = " visible" if args.get("visible_only") else ""
+        return f"count of{scope} ({loc.describe()}) {' and '.join(bounds)}"
+    if op == "element_text":
+        wants = [
+            f"{word} {args[key]!r}"
+            for key, word in (("equals", "equals"), ("contains", "contains"), ("not_contains", "does not contain"))
+            if args.get(key) is not None
+        ]
+        return f"text of ({loc.describe()}) {' and '.join(wants)}"
+    return (
+        f"({loc.describe()}) is {'visible' if op == 'visible' else 'hidden or absent' if op == 'hidden' else 'focused'}"
+    )
 
 
 def timeout_of(timeout_ms):
@@ -95,6 +121,14 @@ class Expectation:
 
         if self.kind == "check":
             return replace(self, description=render(self.description, params, used))
+        if self.kind == "locator":
+            args = dict(self.args)
+            if args.get("locator") is not None:
+                args["locator"] = args["locator"].render(params, used)
+            for key in ("contains", "not_contains", "equals"):
+                if isinstance(args.get(key), str):
+                    args[key] = render(args[key], params, used)
+            return replace(self, args=args, description=describe_locator(args))
         key = {"text": "contains", "url": "match", "element": "name"}[self.kind]
         if not isinstance(self.args.get(key), str):
             return self
@@ -109,7 +143,7 @@ class Expectation:
     def evaluate(self, browser, timeout_ms):
         """A WaitResult, waiting at most timeout_ms (0 checks once). The caller picks it: see `timeout_for`."""
         wait = timeout_ms
-        if self.kind in {"text", "element"}:
+        if self.kind in {"text", "element", "locator"}:
             return browser.probe(self.kind, wait, **self.args)
         start = time.monotonic()
         deadline = start + wait / 1000
@@ -217,3 +251,64 @@ def check(fn, description, auto=False, *, timeout_ms=None):
     if type(auto) is not bool:
         raise ValueError("auto must be True or False")
     return Expectation("check", description.strip(), timeout_of(timeout_ms), {}, fn, auto)
+
+
+def located(loc):
+    if not isinstance(loc, Locator):
+        raise ValueError("this check takes a jev_ultrafast.expect.Locator")
+    return loc
+
+
+def locator_check(op, loc, timeout_ms, **extra):
+    args = {"op": op, "locator": loc, **extra}
+    return Expectation("locator", describe_locator(args), timeout_of(timeout_ms), args)
+
+
+def visible(loc, *, timeout_ms=None):
+    """At least one match of the Locator is visible (the same rule the snapshot uses)."""
+    return locator_check("visible", located(loc), timeout_ms)
+
+
+def hidden(loc, *, timeout_ms=None):
+    """The Locator has no match, or none of its matches is visible. Pair it with `count` to tell the two apart."""
+    return locator_check("hidden", located(loc), timeout_ms)
+
+
+def focused(loc, *, timeout_ms=None):
+    """The one element the Locator matches has keyboard focus. More than one match, without `nth`, is unmet."""
+    return locator_check("focused", located(loc), timeout_ms)
+
+
+def count(loc, *, eq=None, gte=None, lte=None, visible_only=False, timeout_ms=None):
+    """The number of matches (hidden ones included, unless visible_only=True) equals eq, is at least gte and at most
+    lte. Give at least one."""
+    bounds = {"eq": eq, "gte": gte, "lte": lte}
+    if all(value is None for value in bounds.values()):
+        raise ValueError("count needs eq, gte or lte")
+    for key, value in bounds.items():
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError(f"{key} must be a non-negative integer")
+    if gte is not None and lte is not None and gte > lte:
+        raise ValueError("gte must not be greater than lte")
+    if eq is not None and ((gte is not None and eq < gte) or (lte is not None and eq > lte)):
+        raise ValueError("eq contradicts gte or lte")
+    if type(visible_only) is not bool:
+        raise ValueError("visible_only must be True or False")
+    return locator_check("count", located(loc), timeout_ms, visible_only=visible_only, **bounds)
+
+
+def element_text(loc, *, contains=None, not_contains=None, equals=None, timeout_ms=None):
+    """The one element the Locator matches has text (whitespace-normalised, case-sensitive) that equals `equals`,
+    contains `contains` and does not contain `not_contains`. More than one match, without `nth`, is unmet."""
+    wants = {"contains": contains, "not_contains": not_contains, "equals": equals}
+    if all(value is None for value in wants.values()):
+        raise ValueError("element_text needs contains, not_contains or equals")
+    for key, value in wants.items():
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ValueError(f"{key} must be a non-empty string")
+    return locator_check("element_text", located(loc), timeout_ms, **wants)
+
+
+def no_horizontal_scroll(*, timeout_ms=None):
+    """The page does not scroll sideways: its content is no wider than the viewport."""
+    return locator_check("no_hscroll", None, timeout_ms)
