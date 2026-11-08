@@ -2,27 +2,44 @@
 <html lang="en">
 <head><meta charset="utf-8"><title>Orders</title></head>
 <body>
-<!-- The row titles differ on every load: ?name=<text> names the target order, a random suffix when it is absent. The
-     target's Open button carries a test id; the decoy row beside it has none. The rows are plain divs, not list items:
-     a row is a locator scope named by its first text, so a varying title would make the recorded scope unfindable.
-     window.__clicked lists opened rows. -->
+<!-- The row titles differ on every load. ?name=<text> names the target order (a random suffix when absent); the decoy row
+     beside it is always titled "Other ...". By default the rows are real list items (a locator scope named by the row's
+     first text, the case a varying title hits); ?plain=1 builds plain divs, which are no scope. The target's Open button
+     carries the test id, or the decoy's when ?moved=1. Opening a row prints "Opened <its title>"; window.__clicked lists
+     the opened rows. -->
 <main>
   <h1>Orders</h1>
-  <div id="orders">
-    <div data-row="decoy"><span id="decoy-title"></span> <button type="button" onclick="openRow('decoy')">Open</button></div>
-    <div data-row="target"><span id="target-title"></span> <button type="button" data-testid="open-target" onclick="openRow('target')">Open</button></div>
-  </div>
+  <div id="orders"></div>
   <p id="opened"></p>
 </main>
 <script>
-  const name = new URLSearchParams(location.search).get("name") || "Order " + Math.random().toString(36).slice(2, 8);
-  document.getElementById("target-title").textContent = name;
-  document.getElementById("decoy-title").textContent = "Other " + Math.random().toString(36).slice(2, 8);
+  const query = new URLSearchParams(location.search);
+  const suffix = () => Math.random().toString(36).slice(2, 8);
+  const rows = [
+    {id: "decoy", title: "Other " + suffix()},
+    {id: "target", title: query.get("name") || "Order " + suffix()},
+  ];
+  const testId = query.has("moved") ? "decoy" : "target";
+  const plain = query.has("plain");
+  const list = document.createElement(plain ? "div" : "ul");
   window.__clicked = [];
-  function openRow(id) {
-    window.__clicked.push(id);
-    document.getElementById("opened").textContent = "Opened row " + id;
+  for (const row of rows) {
+    const item = document.createElement(plain ? "div" : "li");
+    item.dataset.row = row.id;
+    const title = document.createElement("span");
+    title.textContent = row.title;
+    const open = document.createElement("button");
+    open.type = "button";
+    open.textContent = "Open";
+    if (row.id === testId) open.dataset.testid = "open-row";
+    open.onclick = () => {
+      window.__clicked.push(row.id);
+      document.getElementById("opened").textContent = "Opened " + row.title;
+    };
+    item.append(title, " ", open);
+    list.append(item);
   }
+  document.getElementById("orders").append(list);
 </script>
 </body>
 </html>
