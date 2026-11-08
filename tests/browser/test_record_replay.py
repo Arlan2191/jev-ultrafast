@@ -892,3 +892,58 @@ def test_a_changed_goal_template_is_a_replay_mismatch_even_with_the_same_param_v
     with pytest.raises(ValueError, match="replay_mismatch.*step 1 goal"):
         lab.run(url="replay_params.html?name=Order%20A", goals=changed, chooser=chooser, replay=lab.trace(agent))
     assert chooser.calls == []
+
+
+UNIQUE_GOALS = [Step("Pick it", expect=expect.text("Picked first"))]
+FIRST = "window.__jevFast.ids.get(document.querySelector('[data-m=first]'))"
+
+
+def unique_chooser():
+    return pick_chooser(
+        lambda page, c: next(a["id"] for a in page["actions"] if a.get("node") == c.agent.browser.evaluate(FIRST))
+    )
+
+
+def record_unique(lab):
+    chooser = unique_chooser()
+    agent, state, _model, _wall = lab.run(url="replay_unique.html", goals=UNIQUE_GOALS, chooser=chooser)
+    assert state["status"] == "done" and lab.clicked(agent) == ["first"]
+    locator = next(e for e in load_trace(lab.trace(agent)) if e["type"] == "action")["locator"]
+    assert locator["test_id"] is None and locator["scope"]["count"] == 2
+    assert locator["ordinal"]["document_count"] == 1
+    agent.close()
+    return chooser, agent
+
+
+def test_a_control_unique_in_the_page_replays_without_the_digest_of_a_repeated_scope(lab):
+    chooser, agent = record_unique(lab)
+    chooser.forbid = True  # Another total on this load: the scope digest differs, the control is still the only one.
+    chooser.calls.clear()
+    again, replayed, _model, _wall = lab.run(
+        url="replay_unique.html", goals=UNIQUE_GOALS, chooser=chooser, replay=lab.trace(agent), heal=False
+    )
+    assert replayed["status"] == "done", replayed["stop_reason"]
+    assert set(sources(replayed)) == {"replay"} and chooser.calls == [] and lab.clicked(again) == ["first"]
+    assert replayed["replay"]["model_calls"] == 0 and replayed["replay"]["steps_healed"] == 0
+
+
+def test_a_duplicate_of_the_unique_control_is_not_resolved_by_position_and_heals(lab):
+    chooser, agent = record_unique(lab)
+    again, healed, _model, _wall = lab.run(
+        url="replay_unique.html?variant=dup", goals=UNIQUE_GOALS, chooser=chooser, replay=lab.trace(agent)
+    )
+    assert healed["status"] == "done" and lab.clicked(again) == ["first"]
+    again.close()
+    heal = next(e for e in load_trace(lab.trace(again)) if e["type"] == "heal")
+    assert heal["cause"] == "digest_changed"
+
+
+def test_a_unique_control_moved_into_a_differently_named_scope_is_not_clicked_by_the_replay(lab):
+    chooser, agent = record_unique(lab)
+    again, healed, _model, _wall = lab.run(
+        url="replay_unique.html?variant=moved", goals=UNIQUE_GOALS, chooser=chooser, replay=lab.trace(agent)
+    )
+    again.close()
+    events = load_trace(lab.trace(again))
+    assert any(e["type"] == "heal" for e in events)
+    assert set(sources(healed)) == {"model"}  # The replay itself never pressed it.

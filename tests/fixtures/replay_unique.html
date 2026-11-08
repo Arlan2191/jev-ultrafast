@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Unique in the document</title></head>
+<body>
+<!-- Responsive duplicate layout: two "Shell" main landmarks that both show live data (a different total on every load).
+     The first holds a "Pick" button that is the only one in the document; it has no test id.
+     ?variant=dup: the second landmark gets a "Pick" button too.
+     ?variant=moved: the button moves into a landmark named "Other". -->
+<div id="host"></div>
+<p id="out"></p>
+<script>
+  const variant = new URLSearchParams(location.search).get("variant");
+  window.__clicked = [];
+  const total = "Total " + Math.random();
+  const landmark = (label, withButton, m) => {
+    const main = document.createElement("main");
+    main.setAttribute("aria-label", label);
+    main.innerHTML = `<p>${total}</p>`;
+    if (withButton) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = "Pick";
+      b.setAttribute("data-m", m);
+      b.addEventListener("click", () => {
+        window.__clicked.push(m);
+        document.getElementById("out").textContent = "Picked " + m;
+      });
+      main.appendChild(b);
+    }
+    document.getElementById("host").appendChild(main);
+  };
+  landmark("Shell", variant !== "moved", "first");
+  landmark("Shell", variant === "dup", "second");
+  if (variant === "moved") landmark("Other", true, "first");
+</script>
+</body>
+</html>
