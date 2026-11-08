@@ -56,7 +56,8 @@ def describe_locator(args):
             for key, sign in (("eq", "=="), ("gte", ">="), ("lte", "<="))
             if args.get(key) is not None
         ]
-        return f"count of ({loc.describe()}) {' and '.join(bounds)}"
+        scope = " visible" if args.get("visible_only") else ""
+        return f"count of{scope} ({loc.describe()}) {' and '.join(bounds)}"
     if op == "element_text":
         wants = [
             f"{word} {args[key]!r}"

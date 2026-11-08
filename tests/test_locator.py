@@ -110,3 +110,60 @@ def test_a_step_accepts_locator_checks_and_renders_them_unchanged():
     check = expect.visible(Locator(text="{title}"))
     step = Step("Open it", expect=[check], params={"title": "T"})
     assert step.expect[0].kind == check.kind
+
+
+def test_regex_name_text_and_label_are_accepted_validated_and_serialised():
+    import re
+
+    loc = Locator(role="button", name=re.compile("^save", re.I | re.S), within=Locator(label=re.compile("cart")))
+    data = loc.as_dict()
+    assert data["name"] == {"r": "^save", "f": "is"} and data["within"]["label"] == {"r": "cart", "f": ""}
+    assert json.loads(json.dumps(data)) == data
+    assert hash(loc) == hash(
+        Locator(role="button", name=re.compile("^save", re.I | re.S), within=Locator(label=re.compile("cart")))
+    )
+    assert Locator(text=re.compile("x")).as_dict() == {"text": {"r": "x", "f": ""}}
+    with pytest.raises(ValueError, match="flags"):
+        Locator(text=re.compile("x", re.ASCII))
+    with pytest.raises(ValueError, match="JavaScript"):
+        Locator(text=re.compile("(?P<n>x)(?P=n)"))
+    with pytest.raises(ValueError):
+        Locator(role="button", name=3)
+
+
+def test_regex_fields_are_not_rendered_but_string_fields_are():
+    import re
+
+    loc = Locator(text=re.compile("{x}"), label="{x}")
+    out = loc.render({"x": "v"}, set())
+    assert out.text.pattern == "{x}" and out.label == "v"
+
+
+def test_include_hidden_is_validated_and_serialised():
+    assert Locator(role="button", include_hidden=True).as_dict() == {"role": "button", "include_hidden": True}
+    assert "include_hidden" not in Locator(role="button").as_dict()
+    with pytest.raises(ValueError, match="include_hidden"):
+        Locator(role="button", include_hidden="yes")
+
+
+def test_as_dict_carries_the_test_id_attribute_only_with_a_test_id():
+    assert Locator(css="p").as_dict() == {"css": "p"}
+    assert Locator(test_id="a").as_dict() == {"test_id": "a", "test_id_attribute": "data-testid"}
+
+
+def test_every_field_that_changes_the_result_changes_the_description():
+    import re
+
+    loc = Locator(role="button", name="Save")
+    variants = [
+        expect.count(loc, eq=1),
+        expect.count(loc, eq=1, visible_only=True),
+        expect.count(Locator(role="button", name="Save", include_hidden=True), eq=1),
+        expect.count(Locator(role="button", name="Save", exact=True), eq=1),
+        expect.count(Locator(role="button", name=re.compile("Save")), eq=1),
+        expect.count(Locator(role="button", name=re.compile("Save", re.I)), eq=1),
+        expect.count(Locator(test_id="a"), eq=1),
+        expect.count(Locator(test_id="a", test_id_attribute="data-cy"), eq=1),
+    ]
+    descriptions = [check.description for check in variants]
+    assert len(set(descriptions)) == len(descriptions)

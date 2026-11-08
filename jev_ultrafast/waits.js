@@ -170,11 +170,29 @@
 
   // Locators for `expect` checks: every element the described locator matches, in document order, hidden ones included.
   const squash = text => (text || '').replace(/\s+/g, ' ').trim();
-  const same = (have, want, exact) => exact ? squash(have) === squash(want) : squash(have).toLowerCase().includes(squash(want).toLowerCase());
+  const same = (have, want, exact) => {
+    const text = squash(have);
+    if (typeof want === 'object') return new RegExp(want.r, want.f || '').test(text);
+    return exact ? text === squash(want) : text.toLowerCase().includes(squash(want).toLowerCase());
+  };
   const IMPLIED = {H1: 'heading', H2: 'heading', H3: 'heading', H4: 'heading', H5: 'heading', H6: 'heading', IMG: 'img',
     UL: 'list', OL: 'list', LI: 'listitem', NAV: 'navigation', MAIN: 'main', DIALOG: 'dialog', FORM: 'form',
-    TABLE: 'table', TR: 'row', TD: 'cell', TH: 'columnheader', ARTICLE: 'article', ASIDE: 'complementary'};
-  const roleOf = e => (e.getAttribute('role') || '').trim().split(/\s+/)[0] || role(e) || IMPLIED[e.tagName] || null;
+    TABLE: 'table', TR: 'row', TD: 'cell', TH: 'columnheader', ARTICLE: 'article', ASIDE: 'complementary',
+    HEADER: 'banner', FOOTER: 'contentinfo'};
+  const implied = e => {
+    if (e.tagName === 'A' && !e.hasAttribute('href')) return 'generic';
+    if (e.tagName === 'SECTION') return e.hasAttribute('aria-label') || e.hasAttribute('aria-labelledby') ? 'region' : null;
+    return IMPLIED[e.tagName] || null;
+  };
+  const roleOf = e => (e.getAttribute('role') || '').trim().split(/\s+/)[0] || (e.tagName === 'A' && !e.hasAttribute('href') ? null : role(e)) || implied(e);
+  // Hidden from the accessibility tree: display:none or aria-hidden="true" on the element or an ancestor, or visibility:hidden.
+  const inaccessible = e => {
+    if (['hidden', 'collapse'].includes(getComputedStyle(e).visibility)) return true;
+    for (let a = e; a; a = a.parentElement) {
+      if (a.getAttribute('aria-hidden') === 'true' || getComputedStyle(a).display === 'none') return true;
+    }
+    return false;
+  };
   const labelsOf = e => {
     const found = [];
     const by = (e.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
@@ -184,7 +202,7 @@
     for (const l of e.labels || []) found.push(name(l));
     return found;
   };
-  const textOfEl = e => e.innerText || e.textContent || '';
+  const textOfEl = e => e.textContent || ''; // Hidden descendants count, as in Playwright's getByText.
   const locate = loc => {
     let pool;
     if (loc.css) {
@@ -195,7 +213,7 @@
       pool = pool.filter(e => parents.some(p => p !== e && p.contains(e)));
     }
     if (loc.role) {
-      pool = pool.filter(e => roleOf(e) === loc.role && (loc.name === undefined || same(name(e), loc.name, loc.exact)));
+      pool = pool.filter(e => roleOf(e) === loc.role && (loc.include_hidden || !inaccessible(e)) && (loc.name === undefined || same(name(e), loc.name, loc.exact)));
     }
     if (loc.test_id !== undefined) {
       const attribute = loc.test_id_attribute || 'data-testid';
@@ -253,7 +271,10 @@
     },
     locator(spec) {
       if (spec.op === 'no_hscroll') {
-        const root = document.documentElement, width = Math.max(root.scrollWidth, document.body?.scrollWidth ?? 0);
+        const root = document.documentElement;
+        // A page that hides sideways overflow on purpose cannot be scrolled sideways by the user.
+        if ([root, document.body].some(e => e && ['hidden', 'clip'].includes(getComputedStyle(e).overflowX))) return null;
+        const width = Math.max(root.scrollWidth, document.body?.scrollWidth ?? 0);
         return width <= root.clientWidth + 1 ? null : 'the page scrolls horizontally (' + width + ' px of content in ' + root.clientWidth + ' px)';
       }
       let all;

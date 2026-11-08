@@ -221,16 +221,16 @@ print(state["status"], state["verified"], [s["status"] for s in state["steps"]])
 
   | field | matches |
   | --- | --- |
-  | `role`, `name` | the ARIA role (explicit, or implied by the tag) and accessible name; a name needs a role |
+  | `role`, `name` | the ARIA role (explicit, or implied by the tag, including region, banner, contentinfo; an `<a>` without `href` is not a link) and accessible name; a name needs a role. Elements hidden from the accessibility tree (`display:none`, `visibility:hidden`, inside `aria-hidden="true"`) are left out, as in Playwright's `getByRole`, unless `include_hidden=True` |
   | `test_id`, `test_id_attribute` | the attribute value, always exact; the attribute defaults to `data-testid` |
-  | `label` | `aria-label`, the text of `aria-labelledby` targets, or a `<label>` (`for=` or wrapping) |
-  | `text` | the smallest element whose visible text contains it (whitespace is normalised) |
+  | `label` | `aria-label`, the text of `aria-labelledby` targets (their full text content, hidden targets included), or a `<label>` (`for=` or wrapping) |
+  | `text` | the smallest element whose text content contains it (whitespace is normalised; hidden descendants count, as in Playwright's `getByText`) |
   | `css` | a selector you wrote; the model never produces one |
-  | `exact` | `name`, `label` and `text` must equal the text (case-sensitive) instead of containing it (case-insensitive substring, as in Playwright) |
+  | `exact` | `name`, `label` and `text` must equal the text (case-sensitive) instead of containing it (case-insensitive substring, as in Playwright). `name`, `label` and `text` also take a compiled regex (JavaScript-compatible, flags `i`, `s`, `m`), searched in the whitespace-normalised text; `exact` does not apply to it |
   | `within` | another Locator: the match must be a descendant of one of its matches |
   | `nth` | 0-based index into the matches in document order; visibility is **not** applied first, so a hidden match counts |
 
-  `visible`, `hidden` and `count` look at every match. `focused` and `element_text` need one element: with several matches and no `nth` they are unmet with `ambiguous: N matches`. `element_text` compares whitespace-normalised, case-sensitive text. `count` counts hidden matches too unless `visible_only=True`; use it with `hidden` to tell "absent" from "not visible". `no_horizontal_scroll()` is unmet when the page content is wider than the viewport.
+  `visible`, `hidden` and `count` look at every match; `visible` holds when **any** match is visible (Playwright's `toBeVisible` is strict and fails on several matches; use `count` with `visible_only=True` and `eq=1` for that). `focused` and `element_text` need one element: with several matches and no `nth` they are unmet with `ambiguous: N matches`. `element_text` compares whitespace-normalised, case-sensitive text. `count` counts hidden matches too unless `visible_only=True`; use it with `hidden` to tell "absent" from "not visible". `no_horizontal_scroll()` is unmet when the page content is wider than the viewport, unless `html` or `body` has `overflow-x: hidden` or `clip`. Open shadow roots are not pierced (Playwright does), and the description of every check includes all fields that change its result, so a changed check is a replay mismatch. Each locator check scans the document, so on very large pages the post-action read of many locator checks costs more than the built-in element and text checks.
 
   ```python
   from jev_ultrafast import Step, expect
